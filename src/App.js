@@ -122,13 +122,15 @@ function App() {
 
         const variantTracks = playerRef.current.getVariantTracks();
         addLog(`Found ${variantTracks.length} variant tracks.`);
-        // variantTracks.forEach(v => addLog(`  Track ID: ${v.id}, Label: "${v.label}", Active: ${v.active}, Video: ${v.video?.label}, Audio: ${v.audio?.label}`));
+        variantTracks.forEach(v => addLog(`  Track ID: ${v.id}, Label: "${v.label}", Active: ${v.active}, Video: ${v.video?.label}, Audio: ${v.audio?.label}`));
 
         const programMap = new Map();
         variantTracks.forEach(variant => {
+          console.log(`Program (VID: ${variant.video?.id}, AID: ${variant.audio?.id})`)
           let programName = variant.label ||
                             (variant.video && variant.video.label) ||
                             `Program (VID: ${variant.video?.id}, AID: ${variant.audio?.id})`;
+          console.log(`Program name ${programName}`)
           if (!programMap.has(programName)) {
             programMap.set(programName, variant);
           }
@@ -151,6 +153,7 @@ function App() {
             let activeProgramName = activeVariant.label ||
                                    (activeVariant.video && activeVariant.video.label) ||
                                    `Program (VID: ${activeVariant.video?.id}, AID: ${activeVariant.audio?.id})`;
+            console.log(`availablePrograms ${JSON.stringify(availablePrograms)}`)
             const foundProgram = availablePrograms.find(p => p.label === activeProgramName);
             if (foundProgram) initialProgramLabel = foundProgram.label;
           }
@@ -178,6 +181,8 @@ function App() {
       return;
     }
 
+    const stringifiedData = JSON.stringify(programs);
+    console.log("Program data:", stringifiedData);
     const programData = programs.find(p => p.label === selectedProgramLabel);
     if (!programData || !programData.representativeVariantId) {
       addLog(`Warning: No program data or representativeVariantId for "${selectedProgramLabel}"`);
