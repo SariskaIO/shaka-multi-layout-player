@@ -6,27 +6,38 @@ import './App.css';
 const shaka = require('shaka-player/dist/shaka-player.ui.js');
 
 function App() {
-  const [hlsUrl, setHlsUrl] = useState('https://storage.googleapis.com/hls-streaming-bucket/hls/astylhiwaoefjraf/d9343f94728b437eb5fa91b5b0368304-master.m3u8'); // Pre-fill for testing
+  const [hlsUrl, setHlsUrl] = useState('https://storage.googleapis.com/hls-streaming-bucket/hls/astylhiwaoefjraf/d9343f94728b437eb5fa91b5b0368304-master.m3u8');
   const [manifestUrlToLoad, setManifestUrlToLoad] = useState('');
   const [programs, setPrograms] = useState([]);
   const [selectedProgramLabel, setSelectedProgramLabel] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isSwitching, setIsSwitching] = useState(false); // New state for managing switch operations
+  const [isSwitching, setIsSwitching] = useState(false);
   const [error, setError] = useState(null);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
-  const [playerLogs, setPlayerLogs] = useState([]); // For displaying logs in UI
+  const [playerLogs, setPlayerLogs] = useState([]);
+  const [abrEnabled, setAbrEnabled] = useState(false); // ABR disabled by default for manual switching
 
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const playerRef = useRef(null);
   const uiRef = useRef(null);
+  const switchTimeoutRef = useRef(null);
+  const manifestVersionRef = useRef(0); // Track manifest changes
 
   const addLog = useCallback((message) => {
     console.log(message);
     setPlayerLogs(prevLogs => [
         `[${new Date().toLocaleTimeString()}] ${message}`,
-        ...prevLogs.slice(0, 19) // Keep last 20 logs
+        ...prevLogs.slice(0, 19)
     ]);
+  }, []);
+
+  // Clear any existing switch timeout
+  const clearSwitchTimeout = useCallback(() => {
+    if (switchTimeoutRef.current) {
+      clearTimeout(switchTimeoutRef.current);
+      switchTimeoutRef.current = null;
+    }
   }, []);
 
   // Initialize Shaka Player
@@ -46,39 +57,57 @@ function App() {
       playerRef.current = player;
       addLog('Shaka Player instance created.');
 
+      // Configure ABR settings
+      player.configure({
+        abr: {
+          enabled: abrEnabled
+        }
+      });
+      addLog(`ABR manager ${abrEnabled ? 'enabled' : 'disabled'}`);
+
       const ui = new shaka.ui.Overlay(player, videoContainerRef.current, videoRef.current);
       uiRef.current = ui;
-      ui.getControls(); // Build default UI
+      ui.getControls();
       addLog('Shaka UI Overlay initialized.');
 
       player.addEventListener('error', (event) => {
         const errorDetail = event.detail;
-        addLog(`PLAYER ERROR: Code: ${errorDetail.code}, Message: ${errorDetail.message}, Data: ${JSON.stringify(errorDetail.data)}`);
+        addLog(`PLAYER ERROR: Code: ${errorDetail.code}, Message: ${errorDetail.message}`);
         setError(`Player Error: ${errorDetail.message} (Code: ${errorDetail.code})`);
         setIsLoading(false);
         setIsSwitching(false);
+        clearSwitchTimeout();
       });
 
       player.addEventListener('variantchanged', () => {
         const newVariant = player.getVariantTracks().find(v => v.active);
         if (newVariant) {
-          addLog(`EVENT: variantchanged. New active variant - ID: ${newVariant.id}, Label: "${newVariant.label}", Bandwidth: ${newVariant.bandwidth}`);
-        } else {
-          addLog('EVENT: variantchanged. No active variant found (should not happen if playing).');
+          addLog(`EVENT: variantchanged. New active variant - ID: ${newVariant.id}, Label: "${newVariant.label}"`);
         }
-        setIsSwitching(false); // A variant change likely means a switch attempt completed
+        setIsSwitching(false);
+        clearSwitchTimeout();
+        
+        // Re-enable ABR after successful switch (only if it was originally enabled)
+        if (playerRef.current && abrEnabled) {
+          addLog("Re-enabling ABR manager after variant change");
+          playerRef.current.configure({
+            abr: {
+              enabled: true
+            }
+          });
+        }
       });
 
       player.addEventListener('trackschanged', () => {
-        addLog('EVENT: trackschanged. The set of available tracks has changed.');
+        addLog('EVENT: trackschanged. Available tracks have changed.');
       });
 
       player.addEventListener('buffering', (event) => {
-        addLog(`EVENT: buffering. Player buffering state: ${event.buffering}`);
+        addLog(`EVENT: buffering. State: ${event.buffering}`);
       });
       
       player.addEventListener('loading', () => {
-        addLog('EVENT: loading. Player has started loading data.');
+        addLog('EVENT: loading. Player loading data.');
       });
 
       setIsPlayerReady(true);
@@ -87,6 +116,7 @@ function App() {
 
     return () => {
       addLog('App component unmounting. Destroying Shaka Player...');
+      clearSwitchTimeout();
       if (playerRef.current) {
         playerRef.current.destroy().then(() => {
             addLog('Player destroyed successfully.');
@@ -96,12 +126,11 @@ function App() {
         playerRef.current = null;
       }
       if (uiRef.current) {
-        // uiRef.current.destroy(); // Shaka UI is often destroyed with player
         uiRef.current = null;
       }
       addLog('Cleanup complete.');
     };
-  }, [addLog]); // addLog is memoized
+  }, [addLog, clearSwitchTimeout, abrEnabled]); // Added abrEnabled dependency
 
   // Effect to load manifest
   useEffect(() => {
@@ -115,33 +144,44 @@ function App() {
       setError(null);
       setPrograms([]);
       setSelectedProgramLabel('');
+      setIsSwitching(false);
+      clearSwitchTimeout();
+      
+      // Increment manifest version to invalidate old switches
+      manifestVersionRef.current += 1;
+      const currentManifestVersion = manifestVersionRef.current;
 
       try {
         await playerRef.current.load(manifestUrlToLoad);
-        addLog('Manifest loaded successfully by player!');
+        
+        // Check if this is still the current manifest load
+        if (currentManifestVersion !== manifestVersionRef.current) {
+          addLog('Manifest load cancelled - newer load in progress');
+          return;
+        }
+
+        addLog('Manifest loaded successfully!');
 
         const variantTracks = playerRef.current.getVariantTracks();
         addLog(`Found ${variantTracks.length} variant tracks.`);
-        variantTracks.forEach(v => addLog(`  Track ID: ${v.id}, Label: "${v.label}", Active: ${v.active}, Video: ${v.video?.label}, Audio: ${v.audio?.label}`));
 
         const programMap = new Map();
         variantTracks.forEach(variant => {
-          console.log(`Program (VID: ${variant.video?.id}, AID: ${variant.audio?.id})`)
           let programName = variant.label ||
                             (variant.video && variant.video.label) ||
                             `Program (VID: ${variant.video?.id}, AID: ${variant.audio?.id})`;
-          console.log(`Program name ${programName}`)
+          
           if (!programMap.has(programName)) {
-            programMap.set(programName, variant);
+            programMap.set(programName, {
+              label: programName,
+              variantId: variant.id,
+              bandwidth: variant.bandwidth,
+              manifestVersion: currentManifestVersion // Track which manifest this belongs to
+            });
           }
         });
 
-        const availablePrograms = Array.from(programMap.entries()).map(([label, variant]) => ({
-          label: label,
-          representativeVariantId: variant.id, // Store ID for safer lookup later
-          bandwidth: variant.bandwidth // For display
-        }));
-        
+        const availablePrograms = Array.from(programMap.values());
         setPrograms(availablePrograms);
         addLog(`Populated ${availablePrograms.length} distinct programs.`);
 
@@ -153,87 +193,108 @@ function App() {
             let activeProgramName = activeVariant.label ||
                                    (activeVariant.video && activeVariant.video.label) ||
                                    `Program (VID: ${activeVariant.video?.id}, AID: ${activeVariant.audio?.id})`;
-            console.log(`availablePrograms ${JSON.stringify(availablePrograms)}`)
+            
             const foundProgram = availablePrograms.find(p => p.label === activeProgramName);
             if (foundProgram) initialProgramLabel = foundProgram.label;
           }
           setSelectedProgramLabel(initialProgramLabel);
           addLog(`Initial program set to: "${initialProgramLabel}"`);
         } else {
-          addLog("No distinct programs/layouts found in the manifest.");
-          setError("No distinct programs/layouts found.");
+          addLog("No distinct programs found in the manifest.");
+          setError("No distinct programs found.");
         }
 
       } catch (e) {
-        addLog(`ERROR loading manifest or processing tracks: ${e.message || e}`);
-        setError(`Error: ${e.message || 'Failed to load or process manifest.'}`);
+        if (currentManifestVersion === manifestVersionRef.current) {
+          addLog(`ERROR loading manifest: ${e.message || e}`);
+          setError(`Error: ${e.message || 'Failed to load manifest.'}`);
+        }
       } finally {
-        setIsLoading(false);
+        if (currentManifestVersion === manifestVersionRef.current) {
+          setIsLoading(false);
+        }
       }
     };
 
     loadManifest();
-  }, [manifestUrlToLoad, isPlayerReady, addLog]);
+  }, [manifestUrlToLoad, isPlayerReady, addLog, clearSwitchTimeout]);
 
   // Effect to switch variant track
   useEffect(() => {
-    if (!selectedProgramLabel || !playerRef.current || programs.length === 0 || !isPlayerReady || isSwitching) {
+    if (!selectedProgramLabel || !playerRef.current || programs.length === 0 || !isPlayerReady) {
       return;
     }
 
-    const stringifiedData = JSON.stringify(programs);
-    console.log("Program data:", stringifiedData);
+    // Prevent multiple concurrent switches
+    if (isSwitching) {
+      addLog(`Switch already in progress, ignoring request for "${selectedProgramLabel}"`);
+      return;
+    }
+
     const programData = programs.find(p => p.label === selectedProgramLabel);
-    if (!programData || !programData.representativeVariantId) {
-      addLog(`Warning: No program data or representativeVariantId for "${selectedProgramLabel}"`);
+    if (!programData || !programData.variantId) {
+      addLog(`Warning: No program data found for "${selectedProgramLabel}"`);
       return;
     }
 
-    const targetVariantId = programData.representativeVariantId;
+    // Check if this program data is from the current manifest
+    if (programData.manifestVersion !== manifestVersionRef.current) {
+      addLog(`Program data is outdated (manifest version mismatch). Skipping switch.`);
+      return;
+    }
+
+    const targetVariantId = programData.variantId;
     const allCurrentVariants = playerRef.current.getVariantTracks();
     const activeVariant = allCurrentVariants.find(v => v.active);
 
     if (activeVariant && activeVariant.id === targetVariantId) {
-      addLog(`Program "${selectedProgramLabel}" (Variant ID: ${targetVariantId}) is already active. No switch needed.`);
+      addLog(`Program "${selectedProgramLabel}" is already active. No switch needed.`);
       return;
     }
     
     const variantToSelect = allCurrentVariants.find(v => v.id === targetVariantId);
 
-    if (variantToSelect) {
-      addLog(`Attempting to switch to program: "${selectedProgramLabel}", Variant ID: ${variantToSelect.id}`);
-      setIsSwitching(true); // Prevent re-entry and UI spam
-      setError(null);
-
-      try {
-        // Log player state *before* switch
-        const me = playerRef.current.getMediaElement();
-        if (me) {
-            addLog(`Player state before switch: Paused=${me.paused}, ReadyState=${me.readyState}, NetworkState=${me.networkState}, Buffered=${me.buffered.length ? me.buffered.end(me.buffered.length-1) : 'empty'}`);
-        }
-        
-        playerRef.current.selectVariantTrack(variantToSelect, true /* clearBuffer */);
-        addLog(`Call to selectVariantTrack for "${selectedProgramLabel}" (ID: ${variantToSelect.id}) initiated.`);
-        // The 'variantchanged' event will confirm the switch and reset isSwitching.
-        // If 'variantchanged' doesn't fire, we might need a timeout to reset isSwitching as a fallback.
-        setTimeout(() => {
-            if (isSwitching) { // If still switching after timeout, something might be stuck
-                addLog("Switch timeout reached, resetting isSwitching flag. 'variantchanged' might not have fired.");
-                setIsSwitching(false);
-            }
-        }, 5000); // 5 second timeout for the switch
-
-      } catch (e) {
-        addLog(`ERROR calling selectVariantTrack: ${e.message || e}`);
-        setError(`Error switching layout: ${e.message}`);
-        setIsSwitching(false);
-      }
-    } else {
-      addLog(`ERROR: Could not find variant with ID ${targetVariantId} in current player tracks. Manifest might be outdated or an error occurred.`);
-      setError("Failed to find the variant to switch to. Try reloading the stream.");
-      setIsSwitching(false);
+    if (!variantToSelect) {
+      addLog(`ERROR: Could not find variant with ID ${targetVariantId}. Available IDs: ${allCurrentVariants.map(v => v.id).join(', ')}`);
+      setError("Variant not found. The stream may have changed. Try reloading.");
+      return;
     }
-  }, [selectedProgramLabel, programs, isPlayerReady, addLog, isSwitching]); // isSwitching dependency added to prevent re-runs while one is in progress
+
+    addLog(`Switching to program: "${selectedProgramLabel}", Variant ID: ${variantToSelect.id}`);
+    setIsSwitching(true);
+    setError(null);
+
+    try {
+      const me = playerRef.current.getMediaElement();
+      if (me) {
+          addLog(`Player state before switch: Paused=${me.paused}, ReadyState=${me.readyState}`);
+      }
+      
+      // Disable ABR to prevent automatic variant switching
+      addLog("Disabling ABR manager to prevent automatic switching");
+      playerRef.current.configure({
+        abr: {
+          enabled: false
+        }
+      });
+      
+      playerRef.current.selectVariantTrack(variantToSelect, true);
+      addLog(`selectVariantTrack called for "${selectedProgramLabel}" (ID: ${variantToSelect.id})`);
+      
+      // Set timeout to reset switching state if variantchanged doesn't fire
+      switchTimeoutRef.current = setTimeout(() => {
+          addLog("Switch timeout reached. Resetting switching state.");
+          setIsSwitching(false);
+          switchTimeoutRef.current = null;
+      }, 5000);
+
+    } catch (e) {
+      addLog(`ERROR calling selectVariantTrack: ${e.message || e}`);
+      setError(`Error switching layout: ${e.message}`);
+      setIsSwitching(false);
+      clearSwitchTimeout();
+    }
+  }, [selectedProgramLabel, programs, isPlayerReady, addLog, clearSwitchTimeout]); // Removed isSwitching from dependencies
 
   const handleUrlChange = (event) => setHlsUrl(event.target.value);
 
@@ -247,12 +308,19 @@ function App() {
   };
 
   const handleProgramChange = (event) => {
-    if (!isSwitching) { // Only allow change if not currently switching
-        addLog(`User selected program: "${event.target.value}"`);
-        setSelectedProgramLabel(event.target.value);
-    } else {
-        addLog(`User tried to select "${event.target.value}" but a switch is already in progress.`);
+    const newValue = event.target.value;
+    
+    if (isSwitching || isLoading) {
+        addLog(`User tried to select "${newValue}" but operation in progress. Current switching: ${isSwitching}, loading: ${isLoading}`);
+        // Prevent the dropdown from changing by resetting to current value
+        setTimeout(() => {
+          event.target.value = selectedProgramLabel;
+        }, 0);
+        return;
     }
+    
+    addLog(`User selected program: "${newValue}"`);
+    setSelectedProgramLabel(newValue);
   };
 
   return (
@@ -270,7 +338,7 @@ function App() {
             disabled={isLoading || isSwitching}
           />
           <button onClick={handleLoadClick} disabled={isLoading || isSwitching || !isPlayerReady}>
-            {isLoading ? 'Loading...' : (isPlayerReady ? 'Load Stream' : 'Player Init...')}
+            {isLoading ? 'Loading...' : (isSwitching ? 'Switching...' : (isPlayerReady ? 'Load Stream' : 'Player Init...'))}
           </button>
         </div>
 
@@ -289,12 +357,38 @@ function App() {
 
         {programs.length > 0 && (
           <div className="controls-area">
+            <div style={{ marginBottom: '10px' }}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={abrEnabled}
+                  onChange={(e) => {
+                    setAbrEnabled(e.target.checked);
+                    if (playerRef.current) {
+                      playerRef.current.configure({
+                        abr: {
+                          enabled: e.target.checked
+                        }
+                      });
+                      addLog(`ABR ${e.target.checked ? 'enabled' : 'disabled'} by user`);
+                    }
+                  }}
+                  disabled={isLoading || isSwitching}
+                />
+                {' '}Enable Adaptive Bitrate (ABR) - Note: May interfere with manual program switching
+              </label>
+            </div>
+            
             <label htmlFor="program-select">Select Program/Layout: </label>
             <select
               id="program-select"
               value={selectedProgramLabel}
               onChange={handleProgramChange}
               disabled={isLoading || isSwitching}
+              style={{ 
+                opacity: (isLoading || isSwitching) ? 0.6 : 1,
+                cursor: (isLoading || isSwitching) ? 'not-allowed' : 'pointer'
+              }}
             >
               {programs.map((program) => (
                 <option key={program.label} value={program.label}>
@@ -302,15 +396,17 @@ function App() {
                 </option>
               ))}
             </select>
+            {isSwitching && <span className="switching-indicator"> Switching...</span>}
           </div>
         )}
+        
         {manifestUrlToLoad && programs.length === 0 && !isLoading && !error && (
             <p>No distinct programs found, or stream not loaded.</p>
         )}
 
         <div className="logs-area">
             <h3>Player Logs:</h3>
-            <pre>
+            <pre style={{ maxHeight: '300px', overflow: 'auto', fontSize: '12px' }}>
                 {playerLogs.join('\n')}
             </pre>
         </div>
