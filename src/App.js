@@ -132,6 +132,24 @@ function App() {
     };
   }, [addLog, clearSwitchTimeout, abrEnabled]); // Added abrEnabled dependency
 
+  function extractProgramNameFromOriginalId(originalVideoId) {
+        if (!originalVideoId) return null;
+        
+        // Extract layout name from patterns like "streamId_Layout2.m3u8"
+        const layoutMatch = originalVideoId.match(/_Layout(\d+)\.m3u8$/);
+        if (layoutMatch) {
+            return `Layout${layoutMatch[1]}`;
+        }
+        
+        // Fallback: extract any layout-like pattern
+        const generalMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
+        if (generalMatch) {
+            return generalMatch[1];
+        }
+        
+        return null;
+    }
+
   // Effect to load manifest
   useEffect(() => {
     if (!manifestUrlToLoad || !playerRef.current || !isPlayerReady) {
@@ -168,9 +186,13 @@ function App() {
         const programMap = new Map();
         variantTracks.forEach(variant => {
           let programName = variant.label ||
-                            (variant.video && variant.video.label) ||
-                            `Program (VID: ${variant.video?.id}, AID: ${variant.audio?.id})`;
-          
+                 (variant.video && variant.video.label) ||
+                 extractProgramNameFromOriginalId(variant.originalVideoId) ||
+                 extractProgramNameFromOriginalId(variant.originalAudioId) ||
+                 `Program (VID: ${variant.videoId || 'undefined'}, AID: ${variant.audioId || 'undefined'})`;
+                 
+          addLog(`programName ${programName} in the track ${JSON.stringify(variant)}`);
+
           if (!programMap.has(programName)) {
             programMap.set(programName, {
               label: programName,
