@@ -69,4 +69,5 @@ This section has moved here: [https://facebook.github.io/create-react-app/docs/d
 
 This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
 
+### Set google project to #ProjectId (gcloud config set project sariska-01-prod)
 ### gsutil -m rsync -d -r build/ gs://shaka-multi-layout-player/
