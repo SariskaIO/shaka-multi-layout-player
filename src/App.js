@@ -307,9 +307,9 @@ function App() {
   function extractProgramNameFromOriginalId(originalVideoId) {
     if (!originalVideoId) return null;
     
-    const layoutWithDimensionsMatch = originalVideoId.match(/_Layout(\d+)_\d+_\d+\.m3u8$/);
-    if (layoutWithDimensionsMatch) {
-        return `Layout${layoutWithDimensionsMatch[1]}`;
+    const programWithDimensionsMatch = originalVideoId.match(/_([^_]+)_\d+_\d+\.m3u8$/);
+    if (programWithDimensionsMatch) {
+        return programWithDimensionsMatch[1];
     }
     
     const generalMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
