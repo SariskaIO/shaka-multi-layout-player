@@ -312,6 +312,11 @@ function App() {
         return programWithDimensionsMatch[1];
     }
     
+    const programMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
+    if (programMatch) {
+        return programMatch[1];
+    }
+    
     const generalMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
     if (generalMatch) {
         return generalMatch[1];
