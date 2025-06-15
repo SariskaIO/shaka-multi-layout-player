@@ -133,7 +133,6 @@ function App() {
   }, [addLog, clearSwitchTimeout, abrEnabled]); // Added abrEnabled dependency
 
   function extractProgramNameFromOriginalId(originalVideoId) {
-<<<<<<< HEAD
     if (!originalVideoId) return null;
     
     const programWithDimensionsMatch = originalVideoId.match(/_([^_]+)_\d+_\d+\.m3u8$/);
@@ -144,25 +143,8 @@ function App() {
     const programMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
     if (programMatch) {
         return programMatch[1];
-=======
-        if (!originalVideoId) return null;
-        
-        // Extract layout name from patterns like "streamId_Layout2.m3u8"
-        const layoutMatch = originalVideoId.match(/_Layout(\d+)\.m3u8$/);
-        if (layoutMatch) {
-            return `Layout${layoutMatch[1]}`;
-        }
-        
-        // Fallback: extract any layout-like pattern
-        const generalMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
-        if (generalMatch) {
-            return generalMatch[1];
-        }
-        
-        return null;
->>>>>>> parent of c16b7ec (Added more bus watch handling)
     }
-
+}
   // Effect to load manifest
   useEffect(() => {
     if (!manifestUrlToLoad || !playerRef.current || !isPlayerReady) {
