@@ -135,16 +135,16 @@ function App() {
   function extractProgramNameFromOriginalId(originalVideoId) {
     if (!originalVideoId) return null;
     
-    const programWithDimensionsMatch = originalVideoId.match(/_([^_]+)_\d+_\d+\.m3u8$/);
-    if (programWithDimensionsMatch) {
-        return programWithDimensionsMatch[1];
+    const programWithDimensionsAndTypeMatch = originalVideoId.match(/_([^_]+)_\d+_\d+_(video|audio|av)\.m3u8$/);
+    if (programWithDimensionsAndTypeMatch) {
+        return programWithDimensionsAndTypeMatch[1];
     }
     
     const programMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
     if (programMatch) {
         return programMatch[1];
     }
-}
+  }
   // Effect to load manifest
   useEffect(() => {
     if (!manifestUrlToLoad || !playerRef.current || !isPlayerReady) {
@@ -185,7 +185,6 @@ function App() {
                  extractProgramNameFromOriginalId(variant.originalVideoId) ||
                  extractProgramNameFromOriginalId(variant.originalAudioId) ||
                  `Program (VID: ${variant.videoId || 'undefined'}, AID: ${variant.audioId || 'undefined'})`;
-                 
           addLog(`programName ${programName} in the track ${JSON.stringify(variant)}`);
 
           if (!programMap.has(programName)) {
