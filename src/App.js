@@ -15,19 +15,14 @@ function App() {
   const [error, setError] = useState(null);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [playerLogs, setPlayerLogs] = useState([]);
-  const [abrEnabled, setAbrEnabled] = useState(false);
-  const [playbackStalled, setPlaybackStalled] = useState(false);
-  const [lastPlaybackTime, setLastPlaybackTime] = useState(0);
+  const [abrEnabled, setAbrEnabled] = useState(false); // ABR disabled by default for manual switching
 
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const playerRef = useRef(null);
   const uiRef = useRef(null);
   const switchTimeoutRef = useRef(null);
-  const manifestVersionRef = useRef(0);
-  const stallCheckIntervalRef = useRef(null);
-  const lastTimeUpdateRef = useRef(0);
-  const stallCountRef = useRef(0);
+  const manifestVersionRef = useRef(0); // Track manifest changes
 
   const addLog = useCallback((message) => {
     console.log(message);
@@ -37,6 +32,7 @@ function App() {
     ]);
   }, []);
 
+  // Clear any existing switch timeout
   const clearSwitchTimeout = useCallback(() => {
     if (switchTimeoutRef.current) {
       clearTimeout(switchTimeoutRef.current);
@@ -44,149 +40,7 @@ function App() {
     }
   }, []);
 
-  // Conservative player configuration for cache handling
-  const getOptimizedPlayerConfig = useCallback(() => {
-    return {
-      streaming: {
-        // Reduced buffering to prevent excessive caching
-        bufferingGoal: 15,
-        rebufferingGoal: 2,
-        bufferBehind: 20,
-        
-        // Conservative retry parameters
-        retryParameters: {
-          maxAttempts: 3,
-          baseDelay: 1000,
-          backoffFactor: 2,
-          fuzzFactor: 0.5,
-          timeout: 30000,
-          stallTimeout: 5000,
-          connectionTimeout: 10000
-        }
-      },
-      
-      manifest: {
-        retryParameters: {
-          maxAttempts: 2,
-          baseDelay: 1000,
-          backoffFactor: 2,
-          timeout: 30000
-        },
-        
-        hls: {
-          ignoreTextStreamFailures: true,
-          useFullSegmentsForStartTime: false
-        }
-      },
-      
-      abr: {
-        enabled: abrEnabled
-      }
-    };
-  }, [abrEnabled]);
-
-  // Detect and handle playback stalls
-  const setupStallDetection = useCallback(() => {
-    if (stallCheckIntervalRef.current) {
-      clearInterval(stallCheckIntervalRef.current);
-    }
-
-    stallCheckIntervalRef.current = setInterval(() => {
-      if (!videoRef.current || !playerRef.current) return;
-
-      const video = videoRef.current;
-      const currentTime = video.currentTime;
-      
-      // Check if playback is progressing
-      if (!video.paused && currentTime === lastTimeUpdateRef.current) {
-        stallCountRef.current += 1;
-        
-        if (stallCountRef.current >= 3) { // 3 seconds of no progress
-          addLog(`Playback stall detected at time ${currentTime}. Attempting recovery...`);
-          setPlaybackStalled(true);
-          
-          // Attempt recovery
-          if (playerRef.current.isLive()) {
-            // For live streams, seek to live edge
-            const seekRange = playerRef.current.seekRange();
-            if (seekRange.end > currentTime + 10) {
-              addLog(`Seeking to live edge: ${seekRange.end - 2}`);
-              video.currentTime = seekRange.end - 2;
-            }
-          } else {
-            // For VOD, try to seek slightly forward
-            addLog(`Seeking forward by 0.1 seconds to recover from stall`);
-            video.currentTime = currentTime + 0.1;
-          }
-          
-          stallCountRef.current = 0;
-          setTimeout(() => setPlaybackStalled(false), 3000);
-        }
-      } else {
-        stallCountRef.current = 0;
-        setPlaybackStalled(false);
-      }
-      
-      lastTimeUpdateRef.current = currentTime;
-      setLastPlaybackTime(currentTime);
-    }, 1000);
-  }, [addLog]);
-
-  // Add cache-busting network filter (optional)
-  const setupNetworkFilters = useCallback((player) => {
-    try {
-      const networkingEngine = player.getNetworkingEngine();
-      
-      if (networkingEngine) {
-        // Only add simple logging filter, no URL modification initially
-        networkingEngine.registerResponseFilter((type, response) => {
-          if (response.status === 404 && type === shaka.net.NetworkingEngine.RequestType.SEGMENT) {
-            addLog(`404 error on segment request, this may indicate cache issues`);
-          }
-        });
-        
-        addLog('Network response filter registered for monitoring');
-      }
-    } catch (e) {
-      addLog(`Warning: Could not setup network filters: ${e.message}`);
-    }
-  }, [addLog]);
-
-  // Force reload with cache busting
-  const forceReload = useCallback(async () => {
-    if (!playerRef.current || !manifestUrlToLoad) return;
-    
-    addLog('Force reloading stream with cache busting...');
-    setError(null);
-    
-    try {
-      await playerRef.current.unload();
-      
-      // Add cache buster to URL
-      const url = new URL(manifestUrlToLoad);
-      url.searchParams.set('_reload', Date.now());
-      const cacheBustedUrl = url.toString();
-      
-      addLog(`Reloading with cache-busted URL: ${cacheBustedUrl}`);
-      await playerRef.current.load(cacheBustedUrl);
-      
-      addLog('Stream reloaded successfully');
-    } catch (e) {
-      addLog(`Error during force reload: ${e.message}`);
-      setError(`Reload failed: ${e.message}`);
-      
-      // Fallback: try loading original URL
-      try {
-        addLog('Trying fallback load with original URL...');
-        await playerRef.current.load(manifestUrlToLoad);
-        addLog('Fallback load successful');
-      } catch (fallbackError) {
-        addLog(`Fallback load also failed: ${fallbackError.message}`);
-      }
-    }
-  }, [manifestUrlToLoad, addLog]);
-
-  // Initialize Shaka Player with enhanced configuration
+  // Initialize Shaka Player
   useEffect(() => {
     addLog('App component mounted. Initializing Shaka Player...');
     shaka.polyfill.installAll();
@@ -203,45 +57,28 @@ function App() {
       playerRef.current = player;
       addLog('Shaka Player instance created.');
 
-      // Apply optimized configuration
-      const config = getOptimizedPlayerConfig();
-      player.configure(config);
-      addLog('Applied optimized player configuration');
-
-      // Test basic player functionality
-      addLog(`Player version: ${shaka.Player.version}`);
-      addLog(`Browser supported: ${shaka.Player.isBrowserSupported()}`);
-
-      // Setup network filters for monitoring
-      setupNetworkFilters(player);
+      // Configure ABR settings
+      player.configure({
+        abr: {
+          enabled: abrEnabled
+        }
+      });
+      addLog(`ABR manager ${abrEnabled ? 'enabled' : 'disabled'}`);
 
       const ui = new shaka.ui.Overlay(player, videoContainerRef.current, videoRef.current);
       uiRef.current = ui;
       ui.getControls();
       addLog('Shaka UI Overlay initialized.');
 
-      // Enhanced error handling
       player.addEventListener('error', (event) => {
         const errorDetail = event.detail;
-        addLog(`PLAYER ERROR: Code: ${errorDetail.code}, Category: ${errorDetail.category}, Message: ${errorDetail.message}`);
-        
-        // Specific handling for cache/network related errors
-        if (errorDetail.category === shaka.util.Error.Category.NETWORK) {
-          addLog('Network error detected - this may be cache related');
-          setTimeout(() => {
-            if (window.confirm('Network error detected. Would you like to try reloading the stream?')) {
-              forceReload();
-            }
-          }, 1000);
-        }
-        
+        addLog(`PLAYER ERROR: Code: ${errorDetail.code}, Message: ${errorDetail.message}`);
         setError(`Player Error: ${errorDetail.message} (Code: ${errorDetail.code})`);
         setIsLoading(false);
         setIsSwitching(false);
         clearSwitchTimeout();
       });
 
-      // Enhanced variant change handling
       player.addEventListener('variantchanged', () => {
         const newVariant = player.getVariantTracks().find(v => v.active);
         if (newVariant) {
@@ -250,45 +87,36 @@ function App() {
         setIsSwitching(false);
         clearSwitchTimeout();
         
+        // Re-enable ABR after successful switch (only if it was originally enabled)
         if (playerRef.current && abrEnabled) {
           addLog("Re-enabling ABR manager after variant change");
-          playerRef.current.configure({ abr: { enabled: true } });
+          playerRef.current.configure({
+            abr: {
+              enabled: true
+            }
+          });
         }
       });
 
-      // Add additional event listeners for monitoring
-      player.addEventListener('streaming', () => {
-        // Reset stall detection when streaming starts
-        stallCountRef.current = 0;
+      player.addEventListener('trackschanged', () => {
+        addLog('EVENT: trackschanged. Available tracks have changed.');
       });
 
       player.addEventListener('buffering', (event) => {
         addLog(`EVENT: buffering. State: ${event.buffering}`);
-        if (event.buffering) {
-          stallCountRef.current = 0; // Reset stall counter during buffering
-        }
       });
       
       player.addEventListener('loading', () => {
         addLog('EVENT: loading. Player loading data.');
       });
 
-      // Setup stall detection
-      setupStallDetection();
-
       setIsPlayerReady(true);
-      addLog('Shaka Player is ready with enhanced cache handling.');
+      addLog('Shaka Player is ready.');
     }
 
     return () => {
       addLog('App component unmounting. Destroying Shaka Player...');
-      
-      if (stallCheckIntervalRef.current) {
-        clearInterval(stallCheckIntervalRef.current);
-      }
-      
       clearSwitchTimeout();
-      
       if (playerRef.current) {
         playerRef.current.destroy().then(() => {
             addLog('Player destroyed successfully.');
@@ -302,9 +130,10 @@ function App() {
       }
       addLog('Cleanup complete.');
     };
-  }, [addLog, clearSwitchTimeout, getOptimizedPlayerConfig, setupNetworkFilters, setupStallDetection, forceReload, abrEnabled]);
+  }, [addLog, clearSwitchTimeout, abrEnabled]); // Added abrEnabled dependency
 
   function extractProgramNameFromOriginalId(originalVideoId) {
+<<<<<<< HEAD
     if (!originalVideoId) return null;
     
     const programWithDimensionsMatch = originalVideoId.match(/_([^_]+)_\d+_\d+\.m3u8$/);
@@ -315,17 +144,26 @@ function App() {
     const programMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
     if (programMatch) {
         return programMatch[1];
+=======
+        if (!originalVideoId) return null;
+        
+        // Extract layout name from patterns like "streamId_Layout2.m3u8"
+        const layoutMatch = originalVideoId.match(/_Layout(\d+)\.m3u8$/);
+        if (layoutMatch) {
+            return `Layout${layoutMatch[1]}`;
+        }
+        
+        // Fallback: extract any layout-like pattern
+        const generalMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
+        if (generalMatch) {
+            return generalMatch[1];
+        }
+        
+        return null;
+>>>>>>> parent of c16b7ec (Added more bus watch handling)
     }
-    
-    const generalMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
-    if (generalMatch) {
-        return generalMatch[1];
-    }
-    
-    return null;
-  }
 
-  // Enhanced manifest loading with cache handling
+  // Effect to load manifest
   useEffect(() => {
     if (!manifestUrlToLoad || !playerRef.current || !isPlayerReady) {
       return;
@@ -338,17 +176,16 @@ function App() {
       setPrograms([]);
       setSelectedProgramLabel('');
       setIsSwitching(false);
-      setPlaybackStalled(false);
       clearSwitchTimeout();
       
+      // Increment manifest version to invalidate old switches
       manifestVersionRef.current += 1;
       const currentManifestVersion = manifestVersionRef.current;
 
       try {
-        // Try loading without cache busting first
-        addLog(`Loading manifest: ${manifestUrlToLoad}`);
         await playerRef.current.load(manifestUrlToLoad);
         
+        // Check if this is still the current manifest load
         if (currentManifestVersion !== manifestVersionRef.current) {
           addLog('Manifest load cancelled - newer load in progress');
           return;
@@ -374,7 +211,7 @@ function App() {
               label: programName,
               variantId: variant.id,
               bandwidth: variant.bandwidth,
-              manifestVersion: currentManifestVersion
+              manifestVersion: currentManifestVersion // Track which manifest this belongs to
             });
           }
         });
@@ -402,11 +239,6 @@ function App() {
           setError("No distinct programs found.");
         }
 
-        // Start monitoring for live streams
-        if (playerRef.current.isLive()) {
-          addLog('Live stream detected - monitoring enabled');
-        }
-
       } catch (e) {
         if (currentManifestVersion === manifestVersionRef.current) {
           addLog(`ERROR loading manifest: ${e.message || e}`);
@@ -422,12 +254,13 @@ function App() {
     loadManifest();
   }, [manifestUrlToLoad, isPlayerReady, addLog, clearSwitchTimeout]);
 
-  // Enhanced variant switching
+  // Effect to switch variant track
   useEffect(() => {
     if (!selectedProgramLabel || !playerRef.current || programs.length === 0 || !isPlayerReady) {
       return;
     }
 
+    // Prevent multiple concurrent switches
     if (isSwitching) {
       addLog(`Switch already in progress, ignoring request for "${selectedProgramLabel}"`);
       return;
@@ -439,6 +272,7 @@ function App() {
       return;
     }
 
+    // Check if this program data is from the current manifest
     if (programData.manifestVersion !== manifestVersionRef.current) {
       addLog(`Program data is outdated (manifest version mismatch). Skipping switch.`);
       return;
@@ -468,15 +302,21 @@ function App() {
     try {
       const me = playerRef.current.getMediaElement();
       if (me) {
-          addLog(`Player state before switch: Paused=${me.paused}, ReadyState=${me.readyState}, CurrentTime=${me.currentTime}`);
+          addLog(`Player state before switch: Paused=${me.paused}, ReadyState=${me.readyState}`);
       }
       
+      // Disable ABR to prevent automatic variant switching
       addLog("Disabling ABR manager to prevent automatic switching");
-      playerRef.current.configure({ abr: { enabled: false } });
+      playerRef.current.configure({
+        abr: {
+          enabled: false
+        }
+      });
       
       playerRef.current.selectVariantTrack(variantToSelect, true);
       addLog(`selectVariantTrack called for "${selectedProgramLabel}" (ID: ${variantToSelect.id})`);
       
+      // Set timeout to reset switching state if variantchanged doesn't fire
       switchTimeoutRef.current = setTimeout(() => {
           addLog("Switch timeout reached. Resetting switching state.");
           setIsSwitching(false);
@@ -489,7 +329,7 @@ function App() {
       setIsSwitching(false);
       clearSwitchTimeout();
     }
-  }, [selectedProgramLabel, programs, isPlayerReady, addLog, clearSwitchTimeout]);
+  }, [selectedProgramLabel, programs, isPlayerReady, addLog, clearSwitchTimeout]); // Removed isSwitching from dependencies
 
   const handleUrlChange = (event) => setHlsUrl(event.target.value);
 
@@ -507,6 +347,7 @@ function App() {
     
     if (isSwitching || isLoading) {
         addLog(`User tried to select "${newValue}" but operation in progress. Current switching: ${isSwitching}, loading: ${isLoading}`);
+        // Prevent the dropdown from changing by resetting to current value
         setTimeout(() => {
           event.target.value = selectedProgramLabel;
         }, 0);
@@ -534,21 +375,9 @@ function App() {
           <button onClick={handleLoadClick} disabled={isLoading || isSwitching || !isPlayerReady}>
             {isLoading ? 'Loading...' : (isSwitching ? 'Switching...' : (isPlayerReady ? 'Load Stream' : 'Player Init...'))}
           </button>
-          <button onClick={forceReload} disabled={isLoading || isSwitching || !manifestUrlToLoad}>
-            Force Reload
-          </button>
-          <button onClick={() => addLog(`Player ready: ${isPlayerReady}, URL: ${manifestUrlToLoad || 'none'}`)} disabled={isLoading || isSwitching}>
-            Debug Info
-          </button>
         </div>
 
         {error && <p className="error-message">{error}</p>}
-        
-        {playbackStalled && (
-          <div className="stall-warning" style={{backgroundColor: '#ffeb3b', padding: '10px', margin: '10px 0', borderRadius: '4px'}}>
-            ⚠️ Playback stall detected. Attempting automatic recovery...
-          </div>
-        )}
 
         <div ref={videoContainerRef} className="video-container" data-shaka-player-container data-shaka-player-cast-receiver-id="APP_ID">
           <video
@@ -603,11 +432,6 @@ function App() {
               ))}
             </select>
             {isSwitching && <span className="switching-indicator"> Switching...</span>}
-            
-            <div style={{ marginTop: '10px', fontSize: '12px', color: '#666' }}>
-              Current Time: {lastPlaybackTime.toFixed(1)}s
-              {playbackStalled && <span style={{color: 'red'}}> - STALLED</span>}
-            </div>
           </div>
         )}
         
