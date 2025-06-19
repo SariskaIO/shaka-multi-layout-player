@@ -189,9 +189,7 @@ function App() {
     // if (target.closest('.shaka-controls-container')) return;
     // e.preventDefault();
     // e.stopPropagation();
-
     console.log("jejnqejne")
-
     if (layouts.length <= 1) return;
 
     const containerRect = videoContainerRef.current.getBoundingClientRect();
@@ -227,7 +225,11 @@ function App() {
     if (hitRegion) {
         setClickedRegion(hitRegion);
         const targetLayout = layouts[hitRegion.source_idx];
+        console.log("hitRegion", hitRegion, targetLayout.name , layouts);
+
         if (targetLayout && targetLayout.name !== selectedLayout) {
+            
+
             nextLayoutName = targetLayout.name;
         }
     }
