@@ -6,23 +6,22 @@ import './App.css';
 const shaka = require('shaka-player/dist/shaka-player.ui.js');
 
 function App() {
-  const [hlsUrl, setHlsUrl] = useState('https://storage.googleapis.com/hls-streaming-bucket/hls/astylhiwaoefjraf/d9343f94728b437eb5fa91b5b0368304-master.m3u8');
+  const [hlsUrl, setHlsUrl] = useState('https://edge.dev.sariska.io/hls/fhzcayypmrwoxgzs/e54476bf3d954deab9a4ca82f1a889bd/master.m3u8');
   const [manifestUrlToLoad, setManifestUrlToLoad] = useState('');
-  const [programs, setPrograms] = useState([]);
-  const [selectedProgramLabel, setSelectedProgramLabel] = useState('');
+  const [layouts, setLayouts] = useState([]);
+  const [selectedLayout, setSelectedLayout] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSwitching, setIsSwitching] = useState(false);
   const [error, setError] = useState(null);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [playerLogs, setPlayerLogs] = useState([]);
-  const [abrEnabled, setAbrEnabled] = useState(false); // ABR disabled by default for manual switching
+  const [abrEnabled, setAbrEnabled] = useState(true); // ABR enabled for individual layouts
 
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const playerRef = useRef(null);
   const uiRef = useRef(null);
-  const switchTimeoutRef = useRef(null);
-  const manifestVersionRef = useRef(0); // Track manifest changes
+  const currentLayoutRef = useRef(null);
 
   const addLog = useCallback((message) => {
     console.log(message);
@@ -30,14 +29,6 @@ function App() {
         `[${new Date().toLocaleTimeString()}] ${message}`,
         ...prevLogs.slice(0, 19)
     ]);
-  }, []);
-
-  // Clear any existing switch timeout
-  const clearSwitchTimeout = useCallback(() => {
-    if (switchTimeoutRef.current) {
-      clearTimeout(switchTimeoutRef.current);
-      switchTimeoutRef.current = null;
-    }
   }, []);
 
   // Initialize Shaka Player
@@ -57,10 +48,15 @@ function App() {
       playerRef.current = player;
       addLog('Shaka Player instance created.');
 
-      // Configure ABR settings
+      // Configure player
       player.configure({
         abr: {
           enabled: abrEnabled
+        },
+        streaming: {
+          rebufferingGoal: 2,
+          bufferingGoal: 10,
+          bufferBehind: 30
         }
       });
       addLog(`ABR manager ${abrEnabled ? 'enabled' : 'disabled'}`);
@@ -76,30 +72,13 @@ function App() {
         setError(`Player Error: ${errorDetail.message} (Code: ${errorDetail.code})`);
         setIsLoading(false);
         setIsSwitching(false);
-        clearSwitchTimeout();
       });
 
       player.addEventListener('variantchanged', () => {
         const newVariant = player.getVariantTracks().find(v => v.active);
         if (newVariant) {
-          addLog(`EVENT: variantchanged. New active variant - ID: ${newVariant.id}, Label: "${newVariant.label}"`);
+          addLog(`EVENT: variantchanged. New active variant - Resolution: ${newVariant.width}x${newVariant.height}, Bandwidth: ${(newVariant.bandwidth/1000000).toFixed(2)}Mbps`);
         }
-        setIsSwitching(false);
-        clearSwitchTimeout();
-        
-        // Re-enable ABR after successful switch (only if it was originally enabled)
-        if (playerRef.current && abrEnabled) {
-          addLog("Re-enabling ABR manager after variant change");
-          playerRef.current.configure({
-            abr: {
-              enabled: true
-            }
-          });
-        }
-      });
-
-      player.addEventListener('trackschanged', () => {
-        addLog('EVENT: trackschanged. Available tracks have changed.');
       });
 
       player.addEventListener('buffering', (event) => {
@@ -116,7 +95,6 @@ function App() {
 
     return () => {
       addLog('App component unmounting. Destroying Shaka Player...');
-      clearSwitchTimeout();
       if (playerRef.current) {
         playerRef.current.destroy().then(() => {
             addLog('Player destroyed successfully.');
@@ -130,187 +108,238 @@ function App() {
       }
       addLog('Cleanup complete.');
     };
-  }, [addLog, clearSwitchTimeout, abrEnabled]); // Added abrEnabled dependency
+  }, [addLog, abrEnabled]);
 
-  function extractProgramNameFromOriginalId(originalVideoId) {
-    if (!originalVideoId) return null;
-    
-    const programWithDimensionsAndTypeMatch = originalVideoId.match(/_([^_]+)_\d+_\d+_(video|audio|av)\.m3u8$/);
-    if (programWithDimensionsAndTypeMatch) {
-        return programWithDimensionsAndTypeMatch[1];
+  // Parse HLS manifest to extract all available layouts
+  const parseManifestForLayouts = async (manifestUrl) => {
+    try {
+      addLog('Fetching and parsing HLS manifest...');
+      const response = await fetch(manifestUrl);
+      const manifestText = await response.text();
+      
+      addLog('Manifest fetched successfully. Parsing for layouts...');
+      
+      // Parse HLS manifest for different layouts
+      const lines = manifestText.split('\n');
+      const layoutMap = new Map();
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        
+        // Look for EXT-X-STREAM-INF lines
+        if (line.startsWith('#EXT-X-STREAM-INF:')) {
+          const nextLine = lines[i + 1]?.trim();
+          if (!nextLine || nextLine.startsWith('#')) continue;
+          
+          // Extract layout information from the stream info
+          const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+          const resolutionMatch = line.match(/RESOLUTION=(\d+x\d+)/);
+          const nameMatch = line.match(/NAME="([^"]+)"/);
+          const videoMatch = line.match(/VIDEO="([^"]+)"/);
+          
+          // Determine layout name
+          let layoutName = nameMatch?.[1] || videoMatch?.[1];
+          
+          // If no name/video attribute, try to extract from URL
+          if (!layoutName) {
+            const urlMatch = nextLine.match(/^([^\/]+)\//);
+            layoutName = urlMatch?.[1];
+          }
+          
+          // Extract layout from URL if still not found
+          if (!layoutName) {
+            const layoutMatch = nextLine.match(/Layout\d+/);
+            layoutName = layoutMatch?.[0];
+          }
+          
+          if (layoutName && bandwidthMatch && resolutionMatch) {
+            const bandwidth = parseInt(bandwidthMatch[1]);
+            const resolution = resolutionMatch[1];
+            
+            if (!layoutMap.has(layoutName)) {
+              layoutMap.set(layoutName, {
+                name: layoutName,
+                streams: [],
+                bestQuality: { bandwidth: 0, resolution: '' }
+              });
+            }
+            
+            const layoutData = layoutMap.get(layoutName);
+            layoutData.streams.push({
+              bandwidth,
+              resolution,
+              streamInfoLine: line,
+              streamUrlLine: nextLine
+            });
+            
+            // Track the best quality stream for this layout
+            if (bandwidth > layoutData.bestQuality.bandwidth) {
+              layoutData.bestQuality = { bandwidth, resolution };
+            }
+          }
+        }
+      }
+      
+      // Build base URL from the original manifest URL
+      const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
+      
+      // Convert to array and create layout-specific master playlist URLs
+      const layoutsArray = Array.from(layoutMap.values()).map(layout => {
+        // Create layout-specific master playlist URL
+        const layoutMasterUrl = `${baseUrl}${layout.name}/master.m3u8`;
+        
+        addLog(`Layout "${layout.name}" master playlist URL: ${layoutMasterUrl}`);
+        addLog(`  - ${layout.streams.length} quality variants available`);
+        layout.streams.forEach(stream => {
+          addLog(`    - ${stream.resolution} @ ${(stream.bandwidth/1000000).toFixed(2)}Mbps`);
+        });
+        
+        return {
+          name: layout.name,
+          displayName: layout.name, // Just layout name, no resolution/bandwidth
+          masterUrl: layoutMasterUrl,
+          streams: layout.streams,
+          bandwidth: layout.bestQuality.bandwidth,
+          resolution: layout.bestQuality.resolution
+        };
+      });
+      
+      // Sort by layout name
+      layoutsArray.sort((a, b) => a.name.localeCompare(b.name));
+      
+      addLog(`Parsed ${layoutsArray.length} layouts: ${layoutsArray.map(l => l.name).join(', ')}`);
+      
+      return layoutsArray;
+      
+    } catch (error) {
+      addLog(`Error parsing manifest: ${error.message}`);
+      throw error;
     }
-    
-    const programMatch = originalVideoId.match(/_([^_]+)\.m3u8$/);
-    if (programMatch) {
-        return programMatch[1];
-    }
-  }
-  // Effect to load manifest
+  };
+
+  // Load manifest and parse layouts
   useEffect(() => {
-    if (!manifestUrlToLoad || !playerRef.current || !isPlayerReady) {
-      return;
-    }
+    if (!manifestUrlToLoad) return;
 
     const loadManifest = async () => {
-      addLog(`Attempting to load manifest: ${manifestUrlToLoad}`);
       setIsLoading(true);
       setError(null);
-      setPrograms([]);
-      setSelectedProgramLabel('');
-      setIsSwitching(false);
-      clearSwitchTimeout();
+      setLayouts([]);
+      setSelectedLayout('');
       
-      // Increment manifest version to invalidate old switches
-      manifestVersionRef.current += 1;
-      const currentManifestVersion = manifestVersionRef.current;
-
       try {
-        await playerRef.current.load(manifestUrlToLoad);
+        const parsedLayouts = await parseManifestForLayouts(manifestUrlToLoad);
+        setLayouts(parsedLayouts);
         
-        // Check if this is still the current manifest load
-        if (currentManifestVersion !== manifestVersionRef.current) {
-          addLog('Manifest load cancelled - newer load in progress');
-          return;
-        }
-
-        addLog('Manifest loaded successfully!');
-
-        const variantTracks = playerRef.current.getVariantTracks();
-        addLog(`Found ${variantTracks.length} variant tracks.`);
-
-        const programMap = new Map();
-        variantTracks.forEach(variant => {
-          let programName = variant.label ||
-                 (variant.video && variant.video.label) ||
-                 extractProgramNameFromOriginalId(variant.originalVideoId) ||
-                 extractProgramNameFromOriginalId(variant.originalAudioId) ||
-                 `Program (VID: ${variant.videoId || 'undefined'}, AID: ${variant.audioId || 'undefined'})`;
-          addLog(`programName ${programName} in the track ${JSON.stringify(variant)}`);
-
-          if (!programMap.has(programName)) {
-            programMap.set(programName, {
-              label: programName,
-              variantId: variant.id,
-              bandwidth: variant.bandwidth,
-              manifestVersion: currentManifestVersion // Track which manifest this belongs to
-            });
-          }
-        });
-
-        const availablePrograms = Array.from(programMap.values());
-        setPrograms(availablePrograms);
-        addLog(`Populated ${availablePrograms.length} distinct programs.`);
-
-        if (availablePrograms.length > 0) {
-          const activeVariant = variantTracks.find(v => v.active);
-          let initialProgramLabel = availablePrograms[0].label;
-
-          if (activeVariant) {
-            let activeProgramName = activeVariant.label ||
-                                   (activeVariant.video && activeVariant.video.label) ||
-                                   `Program (VID: ${activeVariant.video?.id}, AID: ${activeVariant.audio?.id})`;
-            
-            const foundProgram = availablePrograms.find(p => p.label === activeProgramName);
-            if (foundProgram) initialProgramLabel = foundProgram.label;
-          }
-          setSelectedProgramLabel(initialProgramLabel);
-          addLog(`Initial program set to: "${initialProgramLabel}"`);
+        if (parsedLayouts.length > 0) {
+          const firstLayout = parsedLayouts[0];
+          setSelectedLayout(firstLayout.name);
+          addLog(`Found ${parsedLayouts.length} layouts. Auto-loading first layout: ${firstLayout.name}`);
+          
+          // Auto-load the first layout
+          setTimeout(() => {
+            if (playerRef.current && isPlayerReady) {
+              addLog(`Auto-loading first layout: ${firstLayout.name} from ${firstLayout.masterUrl}`);
+              playerRef.current.load(firstLayout.masterUrl).then(() => {
+                currentLayoutRef.current = firstLayout.name;
+                addLog(`Successfully auto-loaded layout: ${firstLayout.name}`);
+                
+                // Log available variants for the first layout
+                const variants = playerRef.current.getVariantTracks();
+                addLog(`Layout "${firstLayout.name}" has ${variants.length} quality variants available`);
+                variants.forEach(v => {
+                  addLog(`  - ${v.width}x${v.height} @ ${(v.bandwidth/1000000).toFixed(2)}Mbps`);
+                });
+              }).catch((error) => {
+                addLog(`Error auto-loading first layout: ${error.message}`);
+                setError(`Error loading first layout: ${error.message}`);
+              });
+            }
+          }, 100);
         } else {
-          addLog("No distinct programs found in the manifest.");
-          setError("No distinct programs found.");
+          setError('No layouts found in manifest');
+          addLog('No layouts found in the manifest');
         }
-
-      } catch (e) {
-        if (currentManifestVersion === manifestVersionRef.current) {
-          addLog(`ERROR loading manifest: ${e.message || e}`);
-          setError(`Error: ${e.message || 'Failed to load manifest.'}`);
-        }
+        
+      } catch (error) {
+        setError(`Error loading manifest: ${error.message}`);
+        addLog(`Error loading manifest: ${error.message}`);
       } finally {
-        if (currentManifestVersion === manifestVersionRef.current) {
-          setIsLoading(false);
-        }
+        setIsLoading(false);
       }
     };
 
     loadManifest();
-  }, [manifestUrlToLoad, isPlayerReady, addLog, clearSwitchTimeout]);
+  }, [manifestUrlToLoad, addLog]);
 
-  // Effect to switch variant track
+  // Load specific layout when selected
   useEffect(() => {
-    if (!selectedProgramLabel || !playerRef.current || programs.length === 0 || !isPlayerReady) {
-      return;
-    }
-
-    // Prevent multiple concurrent switches
-    if (isSwitching) {
-      addLog(`Switch already in progress, ignoring request for "${selectedProgramLabel}"`);
-      return;
-    }
-
-    const programData = programs.find(p => p.label === selectedProgramLabel);
-    if (!programData || !programData.variantId) {
-      addLog(`Warning: No program data found for "${selectedProgramLabel}"`);
-      return;
-    }
-
-    // Check if this program data is from the current manifest
-    if (programData.manifestVersion !== manifestVersionRef.current) {
-      addLog(`Program data is outdated (manifest version mismatch). Skipping switch.`);
-      return;
-    }
-
-    const targetVariantId = programData.variantId;
-    const allCurrentVariants = playerRef.current.getVariantTracks();
-    const activeVariant = allCurrentVariants.find(v => v.active);
-
-    if (activeVariant && activeVariant.id === targetVariantId) {
-      addLog(`Program "${selectedProgramLabel}" is already active. No switch needed.`);
+    if (!selectedLayout || !isPlayerReady || !layouts.length) return;
+    
+    const layoutData = layouts.find(l => l.name === selectedLayout);
+    if (!layoutData) return;
+    
+    // Don't reload if it's the same layout
+    if (currentLayoutRef.current === selectedLayout) {
+      addLog(`Layout "${selectedLayout}" is already loaded`);
       return;
     }
     
-    const variantToSelect = allCurrentVariants.find(v => v.id === targetVariantId);
-
-    if (!variantToSelect) {
-      addLog(`ERROR: Could not find variant with ID ${targetVariantId}. Available IDs: ${allCurrentVariants.map(v => v.id).join(', ')}`);
-      setError("Variant not found. The stream may have changed. Try reloading.");
-      return;
-    }
-
-    addLog(`Switching to program: "${selectedProgramLabel}", Variant ID: ${variantToSelect.id}`);
-    setIsSwitching(true);
-    setError(null);
-
-    try {
-      const me = playerRef.current.getMediaElement();
-      if (me) {
-          addLog(`Player state before switch: Paused=${me.paused}, ReadyState=${me.readyState}`);
-      }
+    const loadLayout = async () => {
+      setIsSwitching(true);
+      setError(null);
       
-      // Disable ABR to prevent automatic variant switching
-      addLog("Disabling ABR manager to prevent automatic switching");
-      playerRef.current.configure({
-        abr: {
-          enabled: false
+      try {
+        addLog(`Loading layout: ${selectedLayout} from ${layoutData.masterUrl}`);
+        
+        // Store current time if player is already loaded
+        let currentTime = 0;
+        if (playerRef.current && currentLayoutRef.current) {
+          try {
+            currentTime = videoRef.current?.currentTime || 0;
+            addLog(`Saving current playback time: ${currentTime.toFixed(2)}s`);
+          } catch (e) {
+            addLog('Could not get current time');
+          }
         }
-      });
-      
-      playerRef.current.selectVariantTrack(variantToSelect, true);
-      addLog(`selectVariantTrack called for "${selectedProgramLabel}" (ID: ${variantToSelect.id})`);
-      
-      // Set timeout to reset switching state if variantchanged doesn't fire
-      switchTimeoutRef.current = setTimeout(() => {
-          addLog("Switch timeout reached. Resetting switching state.");
-          setIsSwitching(false);
-          switchTimeoutRef.current = null;
-      }, 5000);
+        
+        // Load the layout-specific master playlist URL
+        await playerRef.current.load(layoutData.masterUrl);
+        
+        // Try to seek to the previous time if switching layouts
+        if (currentTime > 0 && currentLayoutRef.current) {
+          try {
+            setTimeout(() => {
+              if (videoRef.current) {
+                videoRef.current.currentTime = currentTime;
+                addLog(`Restored playback time to: ${currentTime.toFixed(2)}s`);
+              }
+            }, 500);
+          } catch (e) {
+            addLog('Could not restore playback time');
+          }
+        }
+        
+        currentLayoutRef.current = selectedLayout;
+        addLog(`Successfully loaded layout: ${selectedLayout}`);
+        
+        // Log available variants for this layout
+        const variants = playerRef.current.getVariantTracks();
+        addLog(`Layout "${selectedLayout}" has ${variants.length} quality variants available`);
+        variants.forEach(v => {
+          addLog(`  - ${v.width}x${v.height} @ ${(v.bandwidth/1000000).toFixed(2)}Mbps`);
+        });
+        
+      } catch (error) {
+        setError(`Error loading layout: ${error.message}`);
+        addLog(`Error loading layout ${selectedLayout}: ${error.message}`);
+      } finally {
+        setIsSwitching(false);
+      }
+    };
 
-    } catch (e) {
-      addLog(`ERROR calling selectVariantTrack: ${e.message || e}`);
-      setError(`Error switching layout: ${e.message}`);
-      setIsSwitching(false);
-      clearSwitchTimeout();
-    }
-  }, [selectedProgramLabel, programs, isPlayerReady, addLog, clearSwitchTimeout]); // Removed isSwitching from dependencies
+    loadLayout();
+  }, [selectedLayout, isPlayerReady, layouts, addLog]);
 
   const handleUrlChange = (event) => setHlsUrl(event.target.value);
 
@@ -323,26 +352,22 @@ function App() {
     }
   };
 
-  const handleProgramChange = (event) => {
-    const newValue = event.target.value;
+  const handleLayoutChange = (event) => {
+    const newLayout = event.target.value;
     
     if (isSwitching || isLoading) {
-        addLog(`User tried to select "${newValue}" but operation in progress. Current switching: ${isSwitching}, loading: ${isLoading}`);
-        // Prevent the dropdown from changing by resetting to current value
-        setTimeout(() => {
-          event.target.value = selectedProgramLabel;
-        }, 0);
-        return;
+      addLog(`User tried to select "${newLayout}" but operation in progress.`);
+      return;
     }
     
-    addLog(`User selected program: "${newValue}"`);
-    setSelectedProgramLabel(newValue);
+    addLog(`User selected layout: "${newLayout}"`);
+    setSelectedLayout(newLayout);
   };
 
   return (
     <div className="App">
       <header className="App-header">
-        <h1>HLS Program Selector with Shaka Player</h1>
+        <h1>HLS Multi-Layout Player</h1>
       </header>
       <main>
         <div className="input-area">
@@ -350,7 +375,7 @@ function App() {
             type="text"
             value={hlsUrl}
             onChange={handleUrlChange}
-            placeholder="Enter HLS Manifest URL (.m3u8)"
+            placeholder="Enter HLS Master Manifest URL (.m3u8)"
             disabled={isLoading || isSwitching}
           />
           <button onClick={handleLoadClick} disabled={isLoading || isSwitching || !isPlayerReady}>
@@ -371,7 +396,7 @@ function App() {
           ></video>
         </div>
 
-        {programs.length > 0 && (
+        {layouts.length > 0 && (
           <div className="controls-area">
             <div style={{ marginBottom: '10px' }}>
               <label>
@@ -391,33 +416,33 @@ function App() {
                   }}
                   disabled={isLoading || isSwitching}
                 />
-                {' '}Enable Adaptive Bitrate (ABR) - Note: May interfere with manual program switching
+                {' '}Enable Adaptive Bitrate (ABR) for quality switching within each layout
               </label>
             </div>
             
-            <label htmlFor="program-select">Select Program/Layout: </label>
+            <label htmlFor="layout-select">Select Layout: </label>
             <select
-              id="program-select"
-              value={selectedProgramLabel}
-              onChange={handleProgramChange}
+              id="layout-select"
+              value={selectedLayout}
+              onChange={handleLayoutChange}
               disabled={isLoading || isSwitching}
               style={{ 
                 opacity: (isLoading || isSwitching) ? 0.6 : 1,
                 cursor: (isLoading || isSwitching) ? 'not-allowed' : 'pointer'
               }}
             >
-              {programs.map((program) => (
-                <option key={program.label} value={program.label}>
-                  {program.label} ({(program.bandwidth / 1000000).toFixed(2)} Mbps)
+              {layouts.map((layout) => (
+                <option key={layout.name} value={layout.name}>
+                  {layout.displayName}
                 </option>
               ))}
             </select>
-            {isSwitching && <span className="switching-indicator"> Switching...</span>}
+            {isSwitching && <span className="switching-indicator"> Switching Layout...</span>}
           </div>
         )}
         
-        {manifestUrlToLoad && programs.length === 0 && !isLoading && !error && (
-            <p>No distinct programs found, or stream not loaded.</p>
+        {manifestUrlToLoad && layouts.length === 0 && !isLoading && !error && (
+            <p>No layouts found, or stream not loaded.</p>
         )}
 
         <div className="logs-area">
