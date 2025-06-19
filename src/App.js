@@ -1,11 +1,92 @@
-// src/App.js
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import 'shaka-player/dist/controls.css';
 import './App.css';
 
+// Load Shaka Player library at the top level
 const shaka = require('shaka-player/dist/shaka-player.ui.js');
 
+// --- Configuration ---
+const configs = {
+  development: {
+    API_BASE_URL: 'https://api.dev.sariska.io',
+    MEETING_HOST_URL: 'https://meet.dev.sariska.io',
+    DEFAULT_API_KEY: '22fd6f9d8dcb0d402d20d9ba34e5acc46dc34db99eb675913e'
+  },
+  production: {
+    API_BASE_URL: 'https://api.sariska.io',
+    MEETING_HOST_URL: 'https://meet.sariska.io',
+    DEFAULT_API_KEY: '27fd6f9e85c304447d3cc0fb31e7ba8062df58af86ac3f9437'
+  }
+};
+const { API_BASE_URL, DEFAULT_API_KEY } = configs.development;
+
+// --- Helper Functions (defined outside the component for performance) ---
+
+const generateRandomString = (length) => {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+};
+
+const parseManifestForLayouts = async (manifestUrl, addLog) => {
+    try {
+      addLog('Fetching and parsing HLS manifest...');
+      const response = await fetch(manifestUrl);
+      const manifestText = await response.text();
+      addLog('Manifest fetched. Parsing for layouts...');
+
+      const lines = manifestText.split('\n');
+      const layoutMap = new Map();
+      
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (line.startsWith('#EXT-X-STREAM-INF:')) {
+          const nextLine = lines[i + 1]?.trim();
+          if (!nextLine || nextLine.startsWith('#')) continue;
+          
+          const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
+          const resolutionMatch = line.match(/RESOLUTION=(\d+x\d+)/);
+          const nameMatch = line.match(/NAME="([^"]+)"/);
+          const videoMatch = line.match(/VIDEO="([^"]+)"/);
+          
+          let layoutName = nameMatch?.[1] || videoMatch?.[1] || nextLine.match(/^([^\/]+)\//)?.[1] || nextLine.match(/Layout\d+/)?.[0];
+          
+          if (layoutName && bandwidthMatch && resolutionMatch) {
+            if (!layoutMap.has(layoutName)) {
+              layoutMap.set(layoutName, { name: layoutName, streams: [] });
+            }
+            layoutMap.get(layoutName).streams.push({
+              bandwidth: parseInt(bandwidthMatch[1]),
+              resolution: resolutionMatch[1],
+            });
+          }
+        }
+      }
+      
+      const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
+      const layoutsArray = Array.from(layoutMap.values()).map(layout => ({
+        name: layout.name,
+        displayName: layout.name,
+        masterUrl: `${baseUrl}${layout.name}/master.m3u8`,
+      }));
+      
+      layoutsArray.sort((a, b) => a.name.localeCompare(b.name));
+      addLog(`Parsed ${layoutsArray.length} layouts: ${layoutsArray.map(l => l.name).join(', ')}`);
+      return layoutsArray;
+    } catch (error) {
+      addLog(`Error parsing manifest: ${error.message}`);
+      throw error;
+    }
+};
+
+
+// --- The Main React Component ---
+
 function App() {
+  // State and Refs
   const [hlsUrl, setHlsUrl] = useState('https://edge.dev.sariska.io/hls/fhzcayypmrwoxgzs/e54476bf3d954deab9a4ca82f1a889bd/master.m3u8');
   const [manifestUrlToLoad, setManifestUrlToLoad] = useState('');
   const [layouts, setLayouts] = useState([]);
@@ -15,408 +96,314 @@ function App() {
   const [error, setError] = useState(null);
   const [isPlayerReady, setIsPlayerReady] = useState(false);
   const [playerLogs, setPlayerLogs] = useState([]);
-  const [abrEnabled, setAbrEnabled] = useState(true); // ABR enabled for individual layouts
+  const [abrEnabled, setAbrEnabled] = useState(true);
+  const [regions, setRegions] = useState([]);
+  const [clickedRegion, setClickedRegion] = useState(null);
+  const [allLayoutRegions, setAllLayoutRegions] = useState([]);
+  const [canvasDimensions, setCanvasDimensions] = useState({ width: 1920, height: 1080 });
+  const [token, setToken] = useState(null);
 
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const playerRef = useRef(null);
-  const uiRef = useRef(null);
   const currentLayoutRef = useRef(null);
+
+  // --- Core Functions and Callbacks ---
 
   const addLog = useCallback((message) => {
     console.log(message);
-    setPlayerLogs(prevLogs => [
-        `[${new Date().toLocaleTimeString()}] ${message}`,
-        ...prevLogs.slice(0, 19)
-    ]);
+    setPlayerLogs(prevLogs => [`[${new Date().toLocaleTimeString()}] ${message}`, ...prevLogs.slice(0, 49)]);
   }, []);
 
-  // Initialize Shaka Player
-  useEffect(() => {
-    addLog('App component mounted. Initializing Shaka Player...');
-    shaka.polyfill.installAll();
+  const getToken = useCallback(async () => {
+    let id = sessionStorage.getItem('id') || generateRandomString(10);
+    let name = sessionStorage.getItem('name') || generateRandomString(8);
+    sessionStorage.setItem('id', id);
+    sessionStorage.setItem('name', name);
+    
+    let existingToken = sessionStorage.getItem('token');
+    if (existingToken) return existingToken;
+    
+    const response = await fetch(`${API_BASE_URL}/api/v1/misc/generate-token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: DEFAULT_API_KEY, user: { id, name, moderator: true } }),
+    });
 
-    if (!shaka.Player.isBrowserSupported()) {
-      const msg = 'Browser not supported by Shaka Player.';
-      addLog(`ERROR: ${msg}`);
-      setError(msg);
-      return;
-    }
+    if (!response.ok) throw new Error(`Failed to generate token: ${response.status}`);
+    const { token } = await response.json();
+    sessionStorage.setItem('token', token);
+    return token;
+  }, []);
 
-    if (videoRef.current && videoContainerRef.current) {
-      const player = new shaka.Player(videoRef.current);
-      playerRef.current = player;
-      addLog('Shaka Player instance created.');
-
-      // Configure player
-      player.configure({
-        abr: {
-          enabled: abrEnabled
-        },
-        streaming: {
-          rebufferingGoal: 2,
-          bufferingGoal: 10,
-          bufferBehind: 30
-        }
-      });
-      addLog(`ABR manager ${abrEnabled ? 'enabled' : 'disabled'}`);
-
-      const ui = new shaka.ui.Overlay(player, videoContainerRef.current, videoRef.current);
-      uiRef.current = ui;
-      ui.getControls();
-      addLog('Shaka UI Overlay initialized.');
-
-      player.addEventListener('error', (event) => {
-        const errorDetail = event.detail;
-        addLog(`PLAYER ERROR: Code: ${errorDetail.code}, Message: ${errorDetail.message}`);
-        setError(`Player Error: ${errorDetail.message} (Code: ${errorDetail.code})`);
-        setIsLoading(false);
-        setIsSwitching(false);
-      });
-
-      player.addEventListener('variantchanged', () => {
-        const newVariant = player.getVariantTracks().find(v => v.active);
-        if (newVariant) {
-          addLog(`EVENT: variantchanged. New active variant - Resolution: ${newVariant.width}x${newVariant.height}, Bandwidth: ${(newVariant.bandwidth/1000000).toFixed(2)}Mbps`);
-        }
-      });
-
-      player.addEventListener('buffering', (event) => {
-        addLog(`EVENT: buffering. State: ${event.buffering}`);
-      });
-      
-      player.addEventListener('loading', () => {
-        addLog('EVENT: loading. Player loading data.');
-      });
-
-      setIsPlayerReady(true);
-      addLog('Shaka Player is ready.');
-    }
-
-    return () => {
-      addLog('App component unmounting. Destroying Shaka Player...');
-      if (playerRef.current) {
-        playerRef.current.destroy().then(() => {
-            addLog('Player destroyed successfully.');
-        }).catch((e) => {
-            addLog(`Error destroying player: ${e}`);
-        });
-        playerRef.current = null;
-      }
-      if (uiRef.current) {
-        uiRef.current = null;
-      }
-      addLog('Cleanup complete.');
-    };
-  }, [addLog, abrEnabled]);
-
-  // Parse HLS manifest to extract all available layouts
-  const parseManifestForLayouts = async (manifestUrl) => {
+  const fetchAllLayoutRegions = useCallback(async () => {
+    if (!token || !manifestUrlToLoad) return;
+    
     try {
-      addLog('Fetching and parsing HLS manifest...');
-      const response = await fetch(manifestUrl);
-      const manifestText = await response.text();
-      
-      addLog('Manifest fetched successfully. Parsing for layouts...');
-      
-      // Parse HLS manifest for different layouts
-      const lines = manifestText.split('\n');
-      const layoutMap = new Map();
-      
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        
-        // Look for EXT-X-STREAM-INF lines
-        if (line.startsWith('#EXT-X-STREAM-INF:')) {
-          const nextLine = lines[i + 1]?.trim();
-          if (!nextLine || nextLine.startsWith('#')) continue;
-          
-          // Extract layout information from the stream info
-          const bandwidthMatch = line.match(/BANDWIDTH=(\d+)/);
-          const resolutionMatch = line.match(/RESOLUTION=(\d+x\d+)/);
-          const nameMatch = line.match(/NAME="([^"]+)"/);
-          const videoMatch = line.match(/VIDEO="([^"]+)"/);
-          
-          // Determine layout name
-          let layoutName = nameMatch?.[1] || videoMatch?.[1];
-          
-          // If no name/video attribute, try to extract from URL
-          if (!layoutName) {
-            const urlMatch = nextLine.match(/^([^\/]+)\//);
-            layoutName = urlMatch?.[1];
-          }
-          
-          // Extract layout from URL if still not found
-          if (!layoutName) {
-            const layoutMatch = nextLine.match(/Layout\d+/);
-            layoutName = layoutMatch?.[0];
-          }
-          
-          if (layoutName && bandwidthMatch && resolutionMatch) {
-            const bandwidth = parseInt(bandwidthMatch[1]);
-            const resolution = resolutionMatch[1];
-            
-            if (!layoutMap.has(layoutName)) {
-              layoutMap.set(layoutName, {
-                name: layoutName,
-                streams: [],
-                bestQuality: { bandwidth: 0, resolution: '' }
-              });
-            }
-            
-            const layoutData = layoutMap.get(layoutName);
-            layoutData.streams.push({
-              bandwidth,
-              resolution,
-              streamInfoLine: line,
-              streamUrlLine: nextLine
-            });
-            
-            // Track the best quality stream for this layout
-            if (bandwidth > layoutData.bestQuality.bandwidth) {
-              layoutData.bestQuality = { bandwidth, resolution };
-            }
-          }
-        }
+      const urlParts = manifestUrlToLoad.split('/');
+      const hlsIndex = urlParts.findIndex(part => part === 'hls');
+      if (hlsIndex === -1 || hlsIndex + 2 >= urlParts.length) {
+        throw new Error('Could not parse stream path from HLS URL');
       }
+      const streamPath = `${urlParts[hlsIndex + 1]}/${urlParts[hlsIndex + 2]}`;
       
-      // Build base URL from the original manifest URL
-      const baseUrl = manifestUrl.substring(0, manifestUrl.lastIndexOf('/') + 1);
-      
-      // Convert to array and create layout-specific master playlist URLs
-      const layoutsArray = Array.from(layoutMap.values()).map(layout => {
-        // Create layout-specific master playlist URL
-        const layoutMasterUrl = `${baseUrl}${layout.name}/master.m3u8`;
-        
-        addLog(`Layout "${layout.name}" master playlist URL: ${layoutMasterUrl}`);
-        addLog(`  - ${layout.streams.length} quality variants available`);
-        layout.streams.forEach(stream => {
-          addLog(`    - ${stream.resolution} @ ${(stream.bandwidth/1000000).toFixed(2)}Mbps`);
-        });
-        
-        return {
-          name: layout.name,
-          displayName: layout.name, // Just layout name, no resolution/bandwidth
-          masterUrl: layoutMasterUrl,
-          streams: layout.streams,
-          bandwidth: layout.bestQuality.bandwidth,
-          resolution: layout.bestQuality.resolution
-        };
+      const response = await fetch(`${API_BASE_URL}/terraform/v1/hooks/srs/fetchAllLayoutRegions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ stream_path: streamPath }),
       });
       
-      // Sort by layout name
-      layoutsArray.sort((a, b) => a.name.localeCompare(b.name));
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
       
-      addLog(`Parsed ${layoutsArray.length} layouts: ${layoutsArray.map(l => l.name).join(', ')}`);
-      
-      return layoutsArray;
-      
-    } catch (error) {
-      addLog(`Error parsing manifest: ${error.message}`);
-      throw error;
-    }
-  };
-
-  // Load manifest and parse layouts
-  useEffect(() => {
-    if (!manifestUrlToLoad) return;
-
-    const loadManifest = async () => {
-      setIsLoading(true);
-      setError(null);
-      setLayouts([]);
-      setSelectedLayout('');
-      
-      try {
-        const parsedLayouts = await parseManifestForLayouts(manifestUrlToLoad);
-        setLayouts(parsedLayouts);
-        
-        if (parsedLayouts.length > 0) {
-          const firstLayout = parsedLayouts[0];
-          setSelectedLayout(firstLayout.name);
-          addLog(`Found ${parsedLayouts.length} layouts. Auto-loading first layout: ${firstLayout.name}`);
-          
-          // Auto-load the first layout
-          setTimeout(() => {
-            if (playerRef.current && isPlayerReady) {
-              addLog(`Auto-loading first layout: ${firstLayout.name} from ${firstLayout.masterUrl}`);
-              playerRef.current.load(firstLayout.masterUrl).then(() => {
-                currentLayoutRef.current = firstLayout.name;
-                addLog(`Successfully auto-loaded layout: ${firstLayout.name}`);
-                
-                // Log available variants for the first layout
-                const variants = playerRef.current.getVariantTracks();
-                addLog(`Layout "${firstLayout.name}" has ${variants.length} quality variants available`);
-                variants.forEach(v => {
-                  addLog(`  - ${v.width}x${v.height} @ ${(v.bandwidth/1000000).toFixed(2)}Mbps`);
-                });
-              }).catch((error) => {
-                addLog(`Error auto-loading first layout: ${error.message}`);
-                setError(`Error loading first layout: ${error.message}`);
-              });
-            }
-          }, 100);
-        } else {
-          setError('No layouts found in manifest');
-          addLog('No layouts found in the manifest');
-        }
-        
-      } catch (error) {
-        setError(`Error loading manifest: ${error.message}`);
-        addLog(`Error loading manifest: ${error.message}`);
-      } finally {
-        setIsLoading(false);
+      if (data.updated && Array.isArray(data.data)) {
+        setAllLayoutRegions(data.data);
+        addLog(`Successfully loaded ${data.data.length} layout configurations.`);
       }
-    };
+    } catch (error) {
+      addLog(`Failed to fetch layout regions: ${error.message}`);
+    }
+  }, [token, manifestUrlToLoad, addLog]);
 
-    loadManifest();
-  }, [manifestUrlToLoad, addLog]);
-
-  // Load specific layout when selected
-  useEffect(() => {
-    if (!selectedLayout || !isPlayerReady || !layouts.length) return;
-    
-    const layoutData = layouts.find(l => l.name === selectedLayout);
-    if (!layoutData) return;
-    
-    // Don't reload if it's the same layout
-    if (currentLayoutRef.current === selectedLayout) {
-      addLog(`Layout "${selectedLayout}" is already loaded`);
+  const mapRegionsToCurrentLayout = useCallback(() => {
+    if (!selectedLayout || allLayoutRegions.length === 0) {
+      setRegions([]);
       return;
     }
+    const currentLayout = allLayoutRegions.find(l => l.layout_name.toLowerCase() === selectedLayout.toLowerCase());
+    if (currentLayout) {
+      setRegions(currentLayout.regions || []);
+      setCanvasDimensions({
+        width: currentLayout.canvas_width || 1920,
+        height: currentLayout.canvas_height || 1080
+      });
+    } else {
+      setRegions([]);
+    }
+  }, [selectedLayout, allLayoutRegions]);
+
+  // --- Event Handlers ---
+
+  const handleVideoClick = (e) => {
+    // const target = e.target;
+    // if (target.closest('.shaka-controls-container')) return;
+    // e.preventDefault();
+    // e.stopPropagation();
+
+    console.log("jejnqejne")
+
+    if (layouts.length <= 1) return;
+
+    const containerRect = videoContainerRef.current.getBoundingClientRect();
+    const video = videoRef.current;
+    const videoAspectRatio = (video.videoWidth / video.videoHeight) || (16/9);
+    const containerAspectRatio = containerRect.width / containerRect.height;
     
-    const loadLayout = async () => {
-      setIsSwitching(true);
-      setError(null);
-      
-      try {
-        addLog(`Loading layout: ${selectedLayout} from ${layoutData.masterUrl}`);
-        
-        // Store current time if player is already loaded
-        let currentTime = 0;
-        if (playerRef.current && currentLayoutRef.current) {
-          try {
-            currentTime = videoRef.current?.currentTime || 0;
-            addLog(`Saving current playback time: ${currentTime.toFixed(2)}s`);
-          } catch (e) {
-            addLog('Could not get current time');
-          }
+    let videoDisplayWidth, videoDisplayHeight, offsetX, offsetY;
+    if (containerAspectRatio > videoAspectRatio) {
+        videoDisplayHeight = containerRect.height;
+        videoDisplayWidth = videoDisplayHeight * videoAspectRatio;
+        offsetX = (containerRect.width - videoDisplayWidth) / 2;
+        offsetY = 0;
+    } else {
+        videoDisplayWidth = containerRect.width;
+        videoDisplayHeight = videoDisplayWidth / videoAspectRatio;
+        offsetX = 0;
+        offsetY = (containerRect.height - videoDisplayHeight) / 2;
+    }
+    
+    const clickX = e.clientX - containerRect.left;
+    const clickY = e.clientY - containerRect.top;
+    
+    const canvasClickX = ((clickX - offsetX) / videoDisplayWidth) * canvasDimensions.width;
+    const canvasClickY = ((clickY - offsetY) / videoDisplayHeight) * canvasDimensions.height;
+
+    const hitRegion = regions.find(r => 
+        canvasClickX >= r.x && canvasClickX <= (r.x + r.width) &&
+        canvasClickY >= r.y && canvasClickY <= (r.y + r.height)
+    );
+
+    let nextLayoutName;
+    if (hitRegion) {
+        setClickedRegion(hitRegion);
+        const targetLayout = layouts[hitRegion.source_idx];
+        if (targetLayout && targetLayout.name !== selectedLayout) {
+            nextLayoutName = targetLayout.name;
         }
-        
-        // Load the layout-specific master playlist URL
-        await playerRef.current.load(layoutData.masterUrl);
-        
-        // Try to seek to the previous time if switching layouts
-        if (currentTime > 0 && currentLayoutRef.current) {
-          try {
-            setTimeout(() => {
-              if (videoRef.current) {
-                videoRef.current.currentTime = currentTime;
-                addLog(`Restored playback time to: ${currentTime.toFixed(2)}s`);
-              }
-            }, 500);
-          } catch (e) {
-            addLog('Could not restore playback time');
-          }
-        }
-        
-        currentLayoutRef.current = selectedLayout;
-        addLog(`Successfully loaded layout: ${selectedLayout}`);
-        
-        // Log available variants for this layout
-        const variants = playerRef.current.getVariantTracks();
-        addLog(`Layout "${selectedLayout}" has ${variants.length} quality variants available`);
-        variants.forEach(v => {
-          addLog(`  - ${v.width}x${v.height} @ ${(v.bandwidth/1000000).toFixed(2)}Mbps`);
-        });
-        
-      } catch (error) {
-        setError(`Error loading layout: ${error.message}`);
-        addLog(`Error loading layout ${selectedLayout}: ${error.message}`);
-      } finally {
-        setIsSwitching(false);
-      }
-    };
-
-    loadLayout();
-  }, [selectedLayout, isPlayerReady, layouts, addLog]);
-
-  const handleUrlChange = (event) => setHlsUrl(event.target.value);
-
+    }
+    
+    if (!nextLayoutName) {
+        const currentIndex = layouts.findIndex(l => l.name === selectedLayout);
+        const nextIndex = (currentIndex + 1) % layouts.length;
+        nextLayoutName = layouts[nextIndex].name;
+    }
+    setSelectedLayout(nextLayoutName);
+  };
+  
   const handleLoadClick = () => {
     if (hlsUrl.trim()) {
       setManifestUrlToLoad(hlsUrl.trim());
     } else {
       setError("Please enter an HLS URL.");
-      addLog("Load clicked with empty URL.");
     }
   };
 
   const handleLayoutChange = (event) => {
-    const newLayout = event.target.value;
-    
-    if (isSwitching || isLoading) {
-      addLog(`User tried to select "${newLayout}" but operation in progress.`);
+    if (isLoading || isSwitching) return;
+    setSelectedLayout(event.target.value);
+  };
+
+  // --- Lifecycle and Player Effects ---
+
+  useEffect(() => {
+    getToken().then(setToken).catch(err => {
+      addLog(`Token initialization failed: ${err.message}`);
+      setError('Failed to initialize authentication');
+    });
+  }, [getToken, addLog]);
+
+  useEffect(() => {
+    addLog('Initializing Shaka Player...');
+    shaka.polyfill.installAll();
+    if (!shaka.Player.isBrowserSupported()) {
+      setError('Browser not supported by Shaka Player.');
       return;
     }
+
+    const player = new shaka.Player(videoRef.current);
+    playerRef.current = player;
+    const ui = new shaka.ui.Overlay(player, videoContainerRef.current, videoRef.current);
+    ui.getControls();
+
+    player.addEventListener('error', (event) => {
+      const errorDetail = event.detail;
+      if (errorDetail.code === shaka.util.Error.Code.LOAD_INTERRUPTED) {
+        addLog('INFO: Load interrupted by new layout switch. This is normal.');
+        return;
+      }
+      setError(`Player Error: ${errorDetail.message} (Code: ${errorDetail.code})`);
+      setIsLoading(false);
+      setIsSwitching(false);
+    });
+
+    setIsPlayerReady(true);
+    addLog('Shaka Player is ready.');
+
+    return () => {
+      player.destroy().then(() => addLog('Player destroyed.'));
+    };
+  }, [addLog]);
+
+  useEffect(() => {
+    if (playerRef.current) {
+        playerRef.current.configure({ abr: { enabled: abrEnabled } });
+        addLog(`ABR is now ${abrEnabled ? 'enabled' : 'disabled'}.`);
+    }
+  }, [abrEnabled, addLog]);
+
+  useEffect(() => {
+    if (!manifestUrlToLoad || !isPlayerReady) return;
+
+    const loadManifest = async () => {
+      setIsLoading(true);
+      setError(null);
+      setLayouts([]);
+      setAllLayoutRegions([]);
+      
+      try {
+        const parsedLayouts = await parseManifestForLayouts(manifestUrlToLoad, addLog);
+        setLayouts(parsedLayouts);
+        
+        if (parsedLayouts.length > 0) {
+          await fetchAllLayoutRegions();
+          setSelectedLayout(parsedLayouts[0].name);
+        } else {
+          setError('No layouts found in manifest');
+        }
+      } catch (error) {
+        setError(`Error loading manifest: ${error.message}`);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    loadManifest();
+  }, [manifestUrlToLoad, isPlayerReady, fetchAllLayoutRegions, addLog]);
+
+  useEffect(() => {
+    if (!selectedLayout || !isPlayerReady || !layouts.length || isLoading) return;
     
-    addLog(`User selected layout: "${newLayout}"`);
-    setSelectedLayout(newLayout);
-  };
+    const layoutData = layouts.find(l => l.name === selectedLayout);
+    if (!layoutData || currentLayoutRef.current === selectedLayout) return;
+
+    const loadLayout = async () => {
+      setIsSwitching(true);
+      setError(null);
+      const currentTime = videoRef.current?.currentTime || 0;
+      
+      try {
+        addLog(`Switching to layout: ${selectedLayout}`);
+        await playerRef.current.load(layoutData.masterUrl, currentTime > 1 ? currentTime : 0);
+        currentLayoutRef.current = selectedLayout;
+        addLog(`Successfully loaded: ${selectedLayout}`);
+      } catch (error) {
+        console.error(`Error in loadLayout: `, error);
+      } finally {
+        setIsSwitching(false);
+      }
+    };
+    loadLayout();
+  }, [selectedLayout, isPlayerReady, layouts, isLoading, addLog]);
+
+  useEffect(() => {
+    mapRegionsToCurrentLayout();
+  }, [selectedLayout, allLayoutRegions, mapRegionsToCurrentLayout]);
+
+  // --- Render Logic ---
+
+  const isBusy = isLoading || isSwitching;
 
   return (
     <div className="App">
-      <header className="App-header">
-        <h1>HLS Multi-Layout Player</h1>
-      </header>
       <main>
         <div className="input-area">
           <input
             type="text"
             value={hlsUrl}
-            onChange={handleUrlChange}
-            placeholder="Enter HLS Master Manifest URL (.m3u8)"
-            disabled={isLoading || isSwitching}
+            onChange={(e) => setHlsUrl(e.target.value)}
+            placeholder="Enter HLS Master Manifest URL"
+            disabled={isBusy}
           />
-          <button onClick={handleLoadClick} disabled={isLoading || isSwitching || !isPlayerReady}>
-            {isLoading ? 'Loading...' : (isSwitching ? 'Switching...' : (isPlayerReady ? 'Load Stream' : 'Player Init...'))}
+          <button onClick={handleLoadClick} disabled={isBusy || !isPlayerReady || !token}>
+            {isBusy ? 'Loading...' : (isPlayerReady ? (token ? 'Load Stream' : 'Auth Init...') : 'Player Init...')}
           </button>
         </div>
 
         {error && <p className="error-message">{error}</p>}
 
-        <div ref={videoContainerRef} className="video-container" data-shaka-player-container data-shaka-player-cast-receiver-id="APP_ID">
+        <div 
+          ref={videoContainerRef} 
+          className="video-container" 
+          onClick={handleVideoClick}
+        >
           <video
             ref={videoRef}
             id="video"
             autoPlay
             controls={false}
-            style={{ width: '100%', height: '100%' }}
-            data-shaka-player
           ></video>
         </div>
 
         {layouts.length > 0 && (
           <div className="controls-area">
-            <div style={{ marginBottom: '10px' }}>
+            <div>
               <label>
                 <input
                   type="checkbox"
                   checked={abrEnabled}
-                  onChange={(e) => {
-                    setAbrEnabled(e.target.checked);
-                    if (playerRef.current) {
-                      playerRef.current.configure({
-                        abr: {
-                          enabled: e.target.checked
-                        }
-                      });
-                      addLog(`ABR ${e.target.checked ? 'enabled' : 'disabled'} by user`);
-                    }
-                  }}
-                  disabled={isLoading || isSwitching}
+                  onChange={(e) => setAbrEnabled(e.target.checked)}
+                  disabled={isBusy}
                 />
-                {' '}Enable Adaptive Bitrate (ABR) for quality switching within each layout
+                {' '}Enable Adaptive Bitrate (ABR)
               </label>
             </div>
             
@@ -425,11 +412,7 @@ function App() {
               id="layout-select"
               value={selectedLayout}
               onChange={handleLayoutChange}
-              disabled={isLoading || isSwitching}
-              style={{ 
-                opacity: (isLoading || isSwitching) ? 0.6 : 1,
-                cursor: (isLoading || isSwitching) ? 'not-allowed' : 'pointer'
-              }}
+              disabled={isBusy}
             >
               {layouts.map((layout) => (
                 <option key={layout.name} value={layout.name}>
@@ -437,17 +420,31 @@ function App() {
                 </option>
               ))}
             </select>
-            {isSwitching && <span className="switching-indicator"> Switching Layout...</span>}
+            {isSwitching && <span className="switching-indicator"> Switching...</span>}
           </div>
         )}
-        
-        {manifestUrlToLoad && layouts.length === 0 && !isLoading && !error && (
-            <p>No layouts found, or stream not loaded.</p>
+
+        {clickedRegion && (
+          <div className="info-box green">
+            Clicked Region: {clickedRegion.source_type || 'Source'} {clickedRegion.source_idx + 1}
+          </div>
+        )}
+        {regions.length > 0 && (
+          <div className="info-box blue">
+            <h4>Layout Regions ({regions.length}) - Canvas: {canvasDimensions.width}x{canvasDimensions.height}</h4>
+            <div className="small-text">
+              {regions.map((region, index) => (
+                <div key={region.id || index}>
+                  Region {index + 1}: {region.source_type} {region.source_idx + 1} ({region.x}, {region.y}, {region.width}x{region.height})
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
         <div className="logs-area">
             <h3>Player Logs:</h3>
-            <pre style={{ maxHeight: '300px', overflow: 'auto', fontSize: '12px' }}>
+            <pre>
                 {playerLogs.join('\n')}
             </pre>
         </div>
