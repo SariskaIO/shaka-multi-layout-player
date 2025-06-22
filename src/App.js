@@ -145,8 +145,8 @@ function App() {
       if (hlsIndex === -1 || hlsIndex + 2 >= urlParts.length) {
         throw new Error('Could not parse stream path from HLS URL');
       }
+
       const streamPath = `${urlParts[hlsIndex + 1]}/${urlParts[hlsIndex + 2]}`;
-      
       const response = await fetch(`${API_BASE_URL}/terraform/v1/hooks/srs/fetchAllLayoutRegions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -156,7 +156,7 @@ function App() {
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
       const data = await response.json();
       
-      if (data.updated && Array.isArray(data.data)) {
+      if (Array.isArray(data.data)) {
         setAllLayoutRegions(data.data);
         addLog(`Successfully loaded ${data.data.length} layout configurations.`);
       }
@@ -170,8 +170,12 @@ function App() {
       setRegions([]);
       return;
     }
+
     const currentLayout = allLayoutRegions.find(l => l.layout_name.toLowerCase() === selectedLayout.toLowerCase());
     if (currentLayout) {
+
+      console.log("currentLayout.regions", currentLayout.regions);
+      
       setRegions(currentLayout.regions || []);
       setCanvasDimensions({
         width: currentLayout.canvas_width || 1920,
@@ -182,16 +186,10 @@ function App() {
     }
   }, [selectedLayout, allLayoutRegions]);
 
-  // --- Event Handlers ---
 
   const handleVideoClick = (e) => {
-    // const target = e.target;
-    // if (target.closest('.shaka-controls-container')) return;
-    // e.preventDefault();
-    // e.stopPropagation();
-    console.log("jejnqejne")
     if (layouts.length <= 1) return;
-
+  
     const containerRect = videoContainerRef.current.getBoundingClientRect();
     const video = videoRef.current;
     const videoAspectRatio = (video.videoWidth / video.videoHeight) || (16/9);
@@ -215,31 +213,31 @@ function App() {
     
     const canvasClickX = ((clickX - offsetX) / videoDisplayWidth) * canvasDimensions.width;
     const canvasClickY = ((clickY - offsetY) / videoDisplayHeight) * canvasDimensions.height;
-
-    const hitRegion = regions.find(r => 
+  
+    // Find the largest region by area
+    const largestRegion = regions.reduce((largest, current) => {
+      const currentArea = current.width * current.height;
+      const largestArea = largest.width * largest.height;
+      return currentArea > largestArea ? current : largest;
+    }, regions[0]);
+  
+    // Filter out the largest region from clickable regions
+    const clickableRegions = regions.filter(region => region !== largestRegion);
+  
+    const hitRegion = clickableRegions.find(r => 
         canvasClickX >= r.x && canvasClickX <= (r.x + r.width) &&
         canvasClickY >= r.y && canvasClickY <= (r.y + r.height)
     );
-
+  
     let nextLayoutName;
     if (hitRegion) {
-        setClickedRegion(hitRegion);
-        const targetLayout = layouts[hitRegion.source_idx];
-        console.log("hitRegion", hitRegion, targetLayout.name , layouts);
-
-        if (targetLayout && targetLayout.name !== selectedLayout) {
-            
-
-            nextLayoutName = targetLayout.name;
+        console.log("hitRegionhitRegionhitRegionhitRegionhitRegion", hitRegion);
+        nextLayoutName = hitRegion.parent_layout_name;
+        console.log("nextLayoutName", nextLayoutName);
+        if (nextLayoutName !== selectedLayout) {
+          setSelectedLayout(nextLayoutName);
         }
     }
-    
-    if (!nextLayoutName) {
-        const currentIndex = layouts.findIndex(l => l.name === selectedLayout);
-        const nextIndex = (currentIndex + 1) % layouts.length;
-        nextLayoutName = layouts[nextIndex].name;
-    }
-    setSelectedLayout(nextLayoutName);
   };
   
   const handleLoadClick = () => {
@@ -314,6 +312,7 @@ function App() {
       
       try {
         const parsedLayouts = await parseManifestForLayouts(manifestUrlToLoad, addLog);
+        console.log("parsedLayouts", parsedLayouts);
         setLayouts(parsedLayouts);
         
         if (parsedLayouts.length > 0) {
@@ -359,8 +358,6 @@ function App() {
   useEffect(() => {
     mapRegionsToCurrentLayout();
   }, [selectedLayout, allLayoutRegions, mapRegionsToCurrentLayout]);
-
-  // --- Render Logic ---
 
   const isBusy = isLoading || isSwitching;
 
