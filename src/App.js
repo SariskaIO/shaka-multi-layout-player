@@ -20,7 +20,6 @@ const configs = {
 };
 
 // Use development config - change to production as needed
-const { API_BASE_URL, DEFAULT_API_KEY } = configs.development;
 
 // --- Helper Functions (defined outside the component for performance) ---
 const generateRandomString = (length) => {
@@ -110,6 +109,7 @@ function App() {
   const [canvasDimensions, setCanvasDimensions] = useState({ width: 1920, height: 1080 });
   const [token, setToken] = useState(null);
 
+
   // New state for manual token handling
   const [manualToken, setManualToken] = useState('');
   const [showManualTokenInput, setShowManualTokenInput] = useState(false);
@@ -130,8 +130,12 @@ function App() {
   // Updated getToken function with better error handling
   const getToken = useCallback(async () => {
     // Check if API_BASE_URL is properly configured
-    if (!API_BASE_URL || API_BASE_URL.includes('undefined')) {
-      throw new Error('API_BASE_URL is not properly configured');
+    let API_BASE_URL = configs.production.API_BASE_URL;
+    let DEFAULT_API_KEY = configs.production.DEFAULT_API_KEY;
+  
+    if (hlsUrl.indexOf(".dev") >= 0 ) {
+       API_BASE_URL = configs.development.API_BASE_URL;
+       DEFAULT_API_KEY = configs.development.DEFAULT_API_KEY;
     }
 
     let id = sessionStorage.getItem('id') || generateRandomString(10);
@@ -139,11 +143,6 @@ function App() {
     sessionStorage.setItem('id', id);
     sessionStorage.setItem('name', name);
     
-    let existingToken = sessionStorage.getItem('token');
-    if (existingToken) {
-      addLog('Using existing token from session storage');
-      return existingToken;
-    }
     
     try {
       addLog('Attempting to generate authentication token...');
@@ -171,7 +170,6 @@ function App() {
         throw new Error('No token received from server');
       }
       
-      sessionStorage.setItem('token', data.token);
       addLog('Authentication token generated successfully');
       return data.token;
       
@@ -197,7 +195,7 @@ function App() {
       
       throw error;
     }
-  }, [addLog]);
+  }, [addLog, hlsUrl]);
 
   // Manual token application function
   const applyManualToken = useCallback(() => {
@@ -224,8 +222,12 @@ function App() {
     
     try {
       // Check if API_BASE_URL is properly configured
-      if (!API_BASE_URL || API_BASE_URL.includes('undefined')) {
-        throw new Error('API_BASE_URL is not properly configured');
+      let API_BASE_URL = configs.production.API_BASE_URL;
+      let DEFAULT_API_KEY = configs.production.DEFAULT_API_KEY;
+    
+      if (hlsUrl.indexOf(".dev") >= 0 ) {
+         API_BASE_URL = configs.development.API_BASE_URL;
+         DEFAULT_API_KEY = configs.development.DEFAULT_API_KEY;
       }
 
       const urlParts = manifestUrlToLoad.split('/');
@@ -241,7 +243,7 @@ function App() {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json', 
-          'Authorization': `Bearer ${token}`,
+          'Authorization': `Bearer ${await getToken()}`,
           'Accept': 'application/json',
         },
         mode: 'cors',
@@ -340,9 +342,9 @@ function App() {
       return currentArea > largestArea ? current : largest;
     }, null);
   
-    const clickableRegions = regions.filter(region => region !== largestRegion);
+    // const clickableRegions = regions.filter(region => region !== largestRegion);
   
-    const hitRegion = clickableRegions.find(r => 
+    const hitRegion = regions.find(r => 
         canvasClickX >= r.x && canvasClickX <= (r.x + r.width) &&
         canvasClickY >= r.y && canvasClickY <= (r.y + r.height)
     );
@@ -384,8 +386,7 @@ function App() {
     const initToken = async () => {
       setIsTokenLoading(true);
       try {
-        const token = await getToken();
-        setToken(token);
+        setToken(await getToken());
         setError(null);
         setShowManualTokenInput(false);
       } catch (err) {
@@ -404,7 +405,7 @@ function App() {
     };
     
     initToken();
-  }, [getToken, addLog]);
+  }, [getToken, addLog, hlsUrl]);
 
   // Player initialization - runs only once
   useEffect(() => {
